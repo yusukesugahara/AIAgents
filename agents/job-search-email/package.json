@@ -1,0 +1,9 @@
+{
+  "name": "@ai-agents/job-search-email",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ai-agents/agent-core": "workspace:*"
+  }
+}
