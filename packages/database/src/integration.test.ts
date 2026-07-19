@@ -1,11 +1,33 @@
 import { describe, expect, test } from 'bun:test';
 import { IdempotencyConflictError, RetryableJobError } from '@ai-agents/agent-core';
+import { AesGcmTokenCipher } from '@ai-agents/google-oauth';
 
-import { createDatabaseConnection, PostgresAgentRunRepository, PostgresJobQueue } from './index';
+import {
+  createDatabaseConnection,
+  type DatabaseConnection,
+  PostgresAgentRunRepository,
+  PostgresGoogleConnectionRepository,
+  PostgresJobQueue,
+  PostgresOAuthStateRepository,
+} from './index';
 
 const integrationEnabled = process.env.INTEGRATION_TESTS === '1';
 const databaseUrl = process.env.DATABASE_URL;
 const integrationDatabaseUrl = databaseUrl ?? '';
+
+const applyMigrationFile = async (
+  connection: DatabaseConnection,
+  migrationName: string,
+): Promise<void> => {
+  const migration = await Bun.file(
+    new URL(`../migrations/${migrationName}`, import.meta.url),
+  ).text();
+  for (const statement of migration.split('--> statement-breakpoint')) {
+    if (statement.trim()) {
+      await connection.client.unsafe(statement);
+    }
+  }
+};
 
 const runMigrations = () => {
   const result = Bun.spawnSync({
@@ -27,6 +49,68 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
       runMigrations();
       runMigrations();
     }, 15_000);
+
+    test('preserves a usable refresh token while deduplicating existing connections', async () => {
+      const admin = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const databaseName = `oauth_migration_${crypto.randomUUID().replaceAll('-', '')}`;
+      const temporaryDatabaseUrl = new URL(integrationDatabaseUrl);
+      temporaryDatabaseUrl.pathname = `/${databaseName}`;
+      let temporary: DatabaseConnection | undefined;
+
+      try {
+        await admin.client.unsafe(`CREATE DATABASE "${databaseName}"`);
+        temporary = createDatabaseConnection({ databaseUrl: temporaryDatabaseUrl.toString() });
+        for (const migrationName of [
+          '0000_initial.sql',
+          '0001_job_queue_leases.sql',
+          '0002_amazing_roland_deschain.sql',
+          '0003_daffy_slayback.sql',
+          '0004_military_radioactive_man.sql',
+        ]) {
+          await applyMigrationFile(temporary, migrationName);
+        }
+
+        const [user] = (await temporary.client`
+          INSERT INTO users (email) VALUES ('migration@example.com') RETURNING id
+        `) as Array<{ id: string }>;
+        if (!user) {
+          throw new Error('Expected migration test user');
+        }
+        await temporary.client`
+          INSERT INTO connections (
+            user_id, type, google_email, encrypted_refresh_token, status, updated_at
+          ) VALUES
+            (
+              ${user.id}::uuid, 'google', 'migration@example.com', 'usable-ciphertext',
+              'connected', NOW() - INTERVAL '1 day'
+            ),
+            (
+              ${user.id}::uuid, 'google', 'migration@example.com', NULL,
+              'connected', NOW()
+            )
+        `;
+
+        await applyMigrationFile(temporary, '0005_sticky_roulette.sql');
+        expect(await temporary.isSchemaReady()).toBe(false);
+        await applyMigrationFile(temporary, '0006_supreme_red_hulk.sql');
+
+        const rows = (await temporary.client`
+          SELECT encrypted_refresh_token
+          FROM connections
+          WHERE user_id = ${user.id}::uuid
+            AND type = 'google'
+            AND google_email = 'migration@example.com'
+        `) as Array<{ encrypted_refresh_token: string | null }>;
+        expect(rows).toEqual([{ encrypted_refresh_token: 'usable-ciphertext' }]);
+        expect(await temporary.isSchemaReady()).toBe(true);
+      } finally {
+        if (temporary) {
+          await temporary.close();
+        }
+        await admin.client.unsafe(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+        await admin.close();
+      }
+    }, 30_000);
 
     test('stores postgres uuidv7 ids in id columns that use defaults', async () => {
       const connection = createDatabaseConnection({
@@ -61,6 +145,118 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         await connection.client`DELETE FROM agent_jobs WHERE id = ${job.id}`;
         await connection.client`DELETE FROM users WHERE id = ${user.id}`;
       } finally {
+        await connection.close();
+      }
+    });
+
+    test('consumes OAuth state once and upserts encrypted Google connections', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const states = new PostgresOAuthStateRepository(connection);
+      const connections = new PostgresGoogleConnectionRepository(connection);
+      const stateHash = `oauth-state-${crypto.randomUUID()}`;
+      const expiredStateHash = `oauth-expired-${crypto.randomUUID()}`;
+      const email = `oauth-${crypto.randomUUID()}@example.com`;
+      const cipher = AesGcmTokenCipher.fromBase64Key(Buffer.alloc(32, 4).toString('base64'));
+
+      try {
+        const browserNonceHash = `browser-${crypto.randomUUID()}`;
+        await states.create({
+          browserNonceHash,
+          encryptedCodeVerifier: cipher.encrypt('verifier'),
+          expiresAt: new Date(Date.now() + 60_000),
+          stateHash,
+        });
+        expect(
+          await states.consume({ browserNonceHash: 'different-browser', stateHash }),
+        ).toBeNull();
+        expect(await states.consume({ browserNonceHash, stateHash })).toMatchObject({
+          encryptedCodeVerifier: expect.not.stringContaining('verifier'),
+        });
+        expect(await states.consume({ browserNonceHash, stateHash })).toBeNull();
+
+        await states.create({
+          browserNonceHash,
+          encryptedCodeVerifier: cipher.encrypt('expired-verifier'),
+          expiresAt: new Date(Date.now() - 1_000),
+          stateHash: expiredStateHash,
+        });
+        expect(await states.consume({ browserNonceHash, stateHash: expiredStateHash })).toBeNull();
+
+        await connections.upsert({
+          email,
+          encryptedRefreshToken: cipher.encrypt('first-token'),
+          grantedScopes: ['openid', 'https://www.googleapis.com/auth/gmail.readonly'],
+        });
+        const existing = await connections.findByGoogleEmail(email);
+        expect(cipher.decrypt(existing?.encryptedRefreshToken ?? '')).toBe('first-token');
+
+        await connections.upsert({
+          email,
+          encryptedRefreshToken: cipher.encrypt('second-token'),
+          grantedScopes: ['openid'],
+        });
+        const [stored] = (await connection.client`
+          SELECT users.email, connections.encrypted_refresh_token, connections.status
+          FROM connections
+          JOIN users ON users.id = connections.user_id
+          WHERE connections.google_email = ${email}
+        `) as Array<{ email: string; encrypted_refresh_token: string; status: string }>;
+        expect(stored).toEqual({
+          email,
+          encrypted_refresh_token: expect.not.stringContaining('second-token'),
+          status: 'connected',
+        });
+        expect(cipher.decrypt(stored?.encrypted_refresh_token ?? '')).toBe('second-token');
+
+        const freshToken = cipher.encrypt('concurrent-fresh-token');
+        await Promise.all([
+          connections.upsert({
+            email,
+            encryptedRefreshToken: freshToken,
+            grantedScopes: ['openid', 'https://www.googleapis.com/auth/gmail.readonly'],
+          }),
+          connections.upsert({
+            email,
+            encryptedRefreshToken: null,
+            grantedScopes: ['openid', 'https://www.googleapis.com/auth/gmail.readonly'],
+            validateExistingRefreshToken: (value) => {
+              cipher.decrypt(value);
+              return true;
+            },
+          }),
+        ]);
+        const concurrentResult = await connections.findByGoogleEmail(email);
+        expect(cipher.decrypt(concurrentResult?.encryptedRefreshToken ?? '')).toBe(
+          'concurrent-fresh-token',
+        );
+
+        await connection.client`
+          UPDATE connections
+          SET encrypted_refresh_token = 'tampered-ciphertext',
+              granted_scopes = ARRAY['original-scope']::text[]
+          WHERE google_email = ${email}
+        `;
+        expect(
+          await connections.upsert({
+            email,
+            encryptedRefreshToken: null,
+            grantedScopes: ['replacement-scope'],
+            validateExistingRefreshToken: () => false,
+          }),
+        ).toBeNull();
+        const [unchanged] = (await connection.client`
+          SELECT granted_scopes
+          FROM connections
+          WHERE google_email = ${email}
+        `) as Array<{ granted_scopes: string[] }>;
+        expect(unchanged?.granted_scopes).toEqual(['original-scope']);
+      } finally {
+        await connection.client`
+          DELETE FROM oauth_authorization_states
+          WHERE state_hash IN (${stateHash}, ${expiredStateHash})
+        `;
+        await connection.client`DELETE FROM connections WHERE google_email = ${email}`;
+        await connection.client`DELETE FROM users WHERE email = ${email}`;
         await connection.close();
       }
     });

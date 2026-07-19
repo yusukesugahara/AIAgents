@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { resolveApiAccessToken } from './runtime-config';
+import { requiresProtectedApi, resolveApiAccessToken } from './runtime-config';
 
 describe('API runtime configuration', () => {
   test('allows unauthenticated access only in development and test', () => {
@@ -30,5 +30,12 @@ describe('API runtime configuration', () => {
     expect(resolveApiAccessToken({ API_ACCESS_TOKEN: '  secret  ', APP_ENV: 'production' })).toBe(
       'secret',
     );
+  });
+
+  test('uses the same protected-environment rule for dependent services', () => {
+    expect(requiresProtectedApi({ APP_ENV: 'development' })).toBe(false);
+    expect(requiresProtectedApi({ APP_ENV: 'test' })).toBe(false);
+    expect(requiresProtectedApi({ APP_ENV: 'staging' })).toBe(true);
+    expect(requiresProtectedApi({})).toBe(true);
   });
 });

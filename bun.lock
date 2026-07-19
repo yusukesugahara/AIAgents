@@ -40,6 +40,7 @@
         "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/config": "workspace:*",
         "@ai-agents/database": "workspace:*",
+        "@ai-agents/google-oauth": "workspace:*",
         "hono": "^4.11.10",
         "zod": "^4.3.6",
       },
@@ -78,12 +79,17 @@
       "version": "0.1.0",
       "dependencies": {
         "@ai-agents/agent-core": "workspace:*",
+        "@ai-agents/google-oauth": "workspace:*",
         "drizzle-orm": "^0.44.4",
         "postgres": "^3.4.7",
       },
       "devDependencies": {
         "drizzle-kit": "^0.31.4",
       },
+    },
+    "packages/google-oauth": {
+      "name": "@ai-agents/google-oauth",
+      "version": "0.1.0",
     },
     "packages/observability": {
       "name": "@ai-agents/observability",
@@ -108,6 +114,8 @@
     "@ai-agents/database": ["@ai-agents/database@workspace:packages/database"],
 
     "@ai-agents/echo-agent": ["@ai-agents/echo-agent@workspace:agents/echo"],
+
+    "@ai-agents/google-oauth": ["@ai-agents/google-oauth@workspace:packages/google-oauth"],
 
     "@ai-agents/job-search-email": ["@ai-agents/job-search-email@workspace:agents/job-search-email"],
 
