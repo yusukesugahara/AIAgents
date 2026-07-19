@@ -1,0 +1,20 @@
+{
+  "name": "@ai-agents/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "db:generate": "bunx drizzle-kit generate",
+    "db:migrate": "bunx drizzle-kit migrate",
+    "db:test-migrate": "bunx drizzle-kit migrate",
+    "db:check": "bunx drizzle-kit check",
+    "db:studio": "bunx drizzle-kit studio"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.44.4",
+    "postgres": "^3.4.7"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.4"
+  }
+}

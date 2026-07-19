@@ -1,0 +1,51 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: bun apps/api/src/index.ts
+    ports:
+      - "${API_HOST_PORT:-4000}:4000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
+      - APP_PORT=4000
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    command: bun apps/worker/src/index.ts
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ai_agents
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_agents"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 2s
+
+volumes:
+  postgres_data:

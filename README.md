@@ -21,4 +21,29 @@ bun test
 bun --filter @ai-agents/api start
 ```
 
-最初の基盤実装では、`GET /health/live` が利用できます。PostgreSQL、Docker、ジョブキュー、外部サービス連携は後続の実装範囲です。
+PostgreSQL ベースの基盤実装では、次のヘルスチェックを利用できます。
+
+```bash
+curl http://localhost:4000/health/live
+curl http://localhost:4000/health/ready
+```
+
+Docker での起動確認は次です。
+
+```bash
+cp .env.example .env
+docker compose up --build -d postgres
+bun run db:migrate
+docker compose up --build
+```
+
+`.env`を作成しない場合でもDocker Composeは起動でき、コンテナ内のDB接続情報には
+`compose.yaml`の開発用デフォルト値が使われます。ホストからMigrationを実行する場合は、
+上記のように`.env.example`をコピーしてください。
+
+DB Integration TestとDocker Compose全体のIntegration Testは、それぞれ次で実行します。
+
+```bash
+bun run test:integration:database
+bun run test:integration:docker
+```
