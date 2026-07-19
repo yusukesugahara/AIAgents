@@ -1,7 +1,12 @@
 import type { AgentRunRepository } from './agent.types';
 import type { AgentContext } from './agent-context';
 import type { AgentRegistry } from './agent-registry';
-import { AgentCoreError, AgentRunPersistenceError, RetryableJobError } from './errors';
+import {
+  AgentCoreError,
+  AgentDependencyError,
+  AgentRunPersistenceError,
+  RetryableJobError,
+} from './errors';
 import { createUuidV7 } from './uuidv7';
 
 export interface AgentRunRequest {
@@ -94,7 +99,10 @@ export class AgentRunner {
 
       await this.#persistFailure({
         runId,
-        errorCode: agentError instanceof AgentCoreError ? agentError.code : 'JOB_RETRYABLE',
+        errorCode:
+          agentError instanceof AgentCoreError || agentError instanceof AgentDependencyError
+            ? agentError.code
+            : 'JOB_RETRYABLE',
         errorMessage: agentError.message,
         completedAt: this.#now(),
       });
@@ -135,12 +143,16 @@ export class AgentRunner {
     agentId: string,
     runId: string,
     error: unknown,
-  ): AgentCoreError | RetryableJobError {
+  ): AgentCoreError | AgentDependencyError | RetryableJobError {
     if (error instanceof AgentCoreError) {
       return error;
     }
 
     if (error instanceof RetryableJobError) {
+      return error;
+    }
+
+    if (error instanceof AgentDependencyError) {
       return error;
     }
 

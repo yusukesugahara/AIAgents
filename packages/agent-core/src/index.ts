@@ -12,9 +12,10 @@ export { AgentRegistry } from './agent-registry';
 export type { AgentRunnerOptions, AgentRunRequest, AgentRunResult } from './agent-runner';
 export { AgentRunner } from './agent-runner';
 export { defineAgent } from './define-agent';
-export type { AgentCoreErrorCode } from './errors';
+export type { AgentCoreErrorCode, AgentDependencyErrorCode } from './errors';
 export {
   AgentCoreError,
+  AgentDependencyError,
   AgentRunPersistenceError,
   IdempotencyConflictError,
   isRetryableJobError,

@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import {
   AgentCoreError,
+  AgentDependencyError,
   AgentRegistry,
   type AgentRunCompletion,
   type AgentRunFailure,
@@ -223,6 +224,31 @@ describe('AgentRunner', () => {
         runId: 'run-123',
         errorCode: 'JOB_RETRYABLE',
         errorMessage: 'temporary provider failure',
+        completedAt: new Date('2026-07-19T00:00:00.000Z'),
+      },
+    ]);
+  });
+
+  test('preserves dependency error codes and retryability in the failed Run', async () => {
+    const { repository, runner } = createRunner(
+      createAgent(async () => {
+        throw new AgentDependencyError('RATE_LIMITED', true, 'Gmail rate limit was exceeded');
+      }),
+    );
+
+    await expect(
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'manual',
+        input: { greeting: 'Hello' },
+      }),
+    ).rejects.toMatchObject({ code: 'RATE_LIMITED', retryable: true });
+    expect(repository.failed).toEqual([
+      {
+        runId: 'run-123',
+        errorCode: 'RATE_LIMITED',
+        errorMessage: 'Gmail rate limit was exceeded',
         completedAt: new Date('2026-07-19T00:00:00.000Z'),
       },
     ]);

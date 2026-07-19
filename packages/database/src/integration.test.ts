@@ -196,17 +196,21 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           grantedScopes: ['openid'],
         });
         const [stored] = (await connection.client`
-          SELECT users.email, connections.encrypted_refresh_token, connections.status
+          SELECT connections.id, users.email, connections.encrypted_refresh_token, connections.status
           FROM connections
           JOIN users ON users.id = connections.user_id
           WHERE connections.google_email = ${email}
-        `) as Array<{ email: string; encrypted_refresh_token: string; status: string }>;
+        `) as Array<{ id: string; email: string; encrypted_refresh_token: string; status: string }>;
+        if (!stored) {
+          throw new Error('Expected stored Google connection');
+        }
         expect(stored).toEqual({
+          id: expect.any(String),
           email,
           encrypted_refresh_token: expect.not.stringContaining('second-token'),
           status: 'connected',
         });
-        expect(cipher.decrypt(stored?.encrypted_refresh_token ?? '')).toBe('second-token');
+        expect(cipher.decrypt(stored.encrypted_refresh_token)).toBe('second-token');
 
         const freshToken = cipher.encrypt('concurrent-fresh-token');
         await Promise.all([
@@ -250,6 +254,17 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           WHERE google_email = ${email}
         `) as Array<{ granted_scopes: string[] }>;
         expect(unchanged?.granted_scopes).toEqual(['original-scope']);
+        const credential = await connections.findCredentialById(stored.id);
+        expect(credential).toEqual({
+          encryptedRefreshToken: 'tampered-ciphertext',
+          grantedScopes: ['original-scope'],
+        });
+        await connections.markReauthRequired(stored.id);
+        expect(await connections.findCredentialById(stored.id)).toBeNull();
+        const [reauth] = (await connection.client`
+          SELECT status FROM connections WHERE id = ${stored.id}::uuid
+        `) as Array<{ status: string }>;
+        expect(reauth?.status).toBe('reauth_required');
       } finally {
         await connection.client`
           DELETE FROM oauth_authorization_states

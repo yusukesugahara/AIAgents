@@ -3,13 +3,18 @@ import { createHash } from 'node:crypto';
 
 import {
   AesGcmTokenCipher,
+  GoogleAccessTokenService,
+  type GoogleConnectionCredential,
+  type GoogleConnectionCredentialRepository,
   type GoogleConnectionRecord,
   type GoogleConnectionRepository,
   type GoogleConnectionUpsertInput,
   type GoogleOAuthProvider,
   GoogleOAuthService,
+  GoogleRefreshTokenError,
   type GoogleTokenSet,
   HttpGoogleOAuthProvider,
+  HttpGoogleTokenRefresher,
   loadGoogleOAuthConfig,
   type OAuthStateRecord,
   type OAuthStateRepository,
@@ -348,6 +353,199 @@ describe('Google OAuth', () => {
     await expect(
       provider.exchangeAuthorizationCode({ code: 'secret-code', codeVerifier: 'verifier' }),
     ).rejects.toMatchObject({ code: 'OAUTH_PROVIDER_FAILURE' });
+  });
+
+  test('refreshes access tokens through the token endpoint without exposing credentials', async () => {
+    let request: Request | undefined;
+    const refresher = new HttpGoogleTokenRefresher(
+      { clientId: 'client-id', clientSecret: 'client-secret' },
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        request = new Request(input, init);
+        return new Response(
+          JSON.stringify({ access_token: 'short-lived-access', expires_in: 3600 }),
+          {
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      }) as unknown as typeof fetch,
+    );
+
+    await expect(refresher.refreshAccessToken('refresh-secret')).resolves.toEqual({
+      accessToken: 'short-lived-access',
+      expiresInSeconds: 3600,
+    });
+    const body = await request?.text();
+    expect(body).toContain('grant_type=refresh_token');
+    expect(body).toContain('refresh_token=refresh-secret');
+  });
+
+  test('classifies invalid grant and temporary token refresh failures', async () => {
+    const invalidGrant = new HttpGoogleTokenRefresher(
+      { clientId: 'client-id', clientSecret: 'client-secret' },
+      (async () =>
+        new Response(JSON.stringify({ error: 'invalid_grant' }), {
+          status: 400,
+        })) as unknown as typeof fetch,
+    );
+    await expect(invalidGrant.refreshAccessToken('refresh-secret')).rejects.toMatchObject({
+      code: 'INVALID_GRANT',
+    });
+
+    const unavailable = new HttpGoogleTokenRefresher(
+      { clientId: 'client-id', clientSecret: 'client-secret' },
+      (async () => new Response('{}', { status: 503 })) as unknown as typeof fetch,
+    );
+    await expect(unavailable.refreshAccessToken('refresh-secret')).rejects.toMatchObject({
+      code: 'TEMPORARY_UNAVAILABLE',
+    });
+  });
+});
+
+class FakeCredentials implements GoogleConnectionCredentialRepository {
+  credential: GoogleConnectionCredential | null;
+  markFailure: Error | undefined;
+  readonly reauthRequired: string[] = [];
+
+  constructor(credential: GoogleConnectionCredential | null) {
+    this.credential = credential;
+  }
+
+  async findCredentialById(): Promise<GoogleConnectionCredential | null> {
+    return this.credential;
+  }
+
+  async markReauthRequired(connectionId: string): Promise<void> {
+    if (this.markFailure) {
+      throw this.markFailure;
+    }
+    this.reauthRequired.push(connectionId);
+  }
+}
+
+class FakeRefresher {
+  calls = 0;
+  deferred: Promise<void> | undefined;
+  failure: Error | undefined;
+
+  async refreshAccessToken() {
+    this.calls += 1;
+    await this.deferred;
+    if (this.failure) {
+      throw this.failure;
+    }
+    return { accessToken: `access-${this.calls}`, expiresInSeconds: 3600 };
+  }
+}
+
+describe('Google access token service', () => {
+  const gmailScope = 'https://www.googleapis.com/auth/gmail.readonly';
+
+  test('refreshes an encrypted token once and shares concurrent refreshes', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const credentials = new FakeCredentials({
+      encryptedRefreshToken: cipher.encrypt('refresh-secret'),
+      grantedScopes: [gmailScope],
+    });
+    const refresher = new FakeRefresher();
+    let release: (() => void) | undefined;
+    refresher.deferred = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const service = new GoogleAccessTokenService({ cipher, credentials, refresher });
+
+    const first = service.getAccessToken('connection-id');
+    const second = service.getAccessToken('connection-id');
+    release?.();
+
+    await expect(Promise.all([first, second])).resolves.toEqual(['access-1', 'access-1']);
+    expect(refresher.calls).toBe(1);
+    await expect(service.getAccessToken('connection-id')).resolves.toBe('access-1');
+    expect(refresher.calls).toBe(1);
+  });
+
+  test('refreshes again inside the configured expiry skew and can invalidate a cached token', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const credentials = new FakeCredentials({
+      encryptedRefreshToken: cipher.encrypt('refresh-secret'),
+      grantedScopes: [gmailScope],
+    });
+    const refresher = new FakeRefresher();
+    let now = new Date('2026-07-19T00:00:00.000Z');
+    const service = new GoogleAccessTokenService({
+      cipher,
+      credentials,
+      now: () => now,
+      refreshSkewMs: 60_000,
+      refresher,
+    });
+
+    await service.getAccessToken('connection-id');
+    now = new Date('2026-07-19T00:59:01.000Z');
+    await service.getAccessToken('connection-id');
+    service.invalidateAccessToken('connection-id');
+    await service.getAccessToken('connection-id');
+    expect(refresher.calls).toBe(3);
+  });
+
+  test('requires an active connection and required Gmail scope', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const refresher = new FakeRefresher();
+    await expect(
+      new GoogleAccessTokenService({
+        cipher,
+        credentials: new FakeCredentials(null),
+        refresher,
+      }).getAccessToken('missing'),
+    ).rejects.toMatchObject({ code: 'AUTHENTICATION_REQUIRED', retryable: false });
+    await expect(
+      new GoogleAccessTokenService({
+        cipher,
+        credentials: new FakeCredentials({
+          encryptedRefreshToken: cipher.encrypt('refresh-secret'),
+          grantedScopes: [],
+        }),
+        refresher,
+      }).getAccessToken('connection-id'),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED', retryable: false });
+  });
+
+  test('marks invalid refresh tokens as requiring reauthorization and maps temporary failures', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const credentials = new FakeCredentials({
+      encryptedRefreshToken: cipher.encrypt('refresh-secret'),
+      grantedScopes: [gmailScope],
+    });
+    const refresher = new FakeRefresher();
+    refresher.failure = new GoogleRefreshTokenError('INVALID_GRANT', 'invalid grant');
+    const service = new GoogleAccessTokenService({ cipher, credentials, refresher });
+    await expect(service.getAccessToken('connection-id')).rejects.toMatchObject({
+      code: 'AUTHENTICATION_REQUIRED',
+      retryable: false,
+    });
+    expect(credentials.reauthRequired).toEqual(['connection-id']);
+
+    refresher.failure = new GoogleRefreshTokenError('TEMPORARY_UNAVAILABLE', 'temporary');
+    await expect(service.getAccessToken('connection-id')).rejects.toMatchObject({
+      code: 'TEMPORARY_UNAVAILABLE',
+      retryable: true,
+    });
+  });
+
+  test('treats a failed reauthorization-state update as retryable', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const credentials = new FakeCredentials({
+      encryptedRefreshToken: cipher.encrypt('refresh-secret'),
+      grantedScopes: [gmailScope],
+    });
+    credentials.markFailure = new Error('database unavailable');
+    const refresher = new FakeRefresher();
+    refresher.failure = new GoogleRefreshTokenError('INVALID_GRANT', 'invalid grant');
+
+    await expect(
+      new GoogleAccessTokenService({ cipher, credentials, refresher }).getAccessToken(
+        'connection-id',
+      ),
+    ).rejects.toMatchObject({ code: 'TEMPORARY_UNAVAILABLE', retryable: true });
   });
 });
 

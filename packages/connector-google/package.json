@@ -1,0 +1,11 @@
+{
+  "name": "@ai-agents/connector-google",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ai-agents/agent-core": "workspace:*",
+    "@ai-agents/google-oauth": "workspace:*",
+    "zod": "^4.3.6"
+  }
+}

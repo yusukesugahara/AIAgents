@@ -17,6 +17,29 @@ export class AgentCoreError extends Error {
   }
 }
 
+export type AgentDependencyErrorCode =
+  | 'AUTHENTICATION_REQUIRED'
+  | 'RATE_LIMITED'
+  | 'TEMPORARY_UNAVAILABLE'
+  | 'INVALID_REQUEST'
+  | 'PERMISSION_DENIED'
+  | 'NOT_FOUND'
+  | 'INVALID_RESPONSE'
+  | 'UNKNOWN';
+
+/** An error returned by a service that an Agent depends on, such as Gmail or an LLM provider. */
+export class AgentDependencyError extends Error {
+  constructor(
+    readonly code: AgentDependencyErrorCode,
+    readonly retryable: boolean,
+    message: string,
+    options: ErrorOptions = {},
+  ) {
+    super(message, options);
+    this.name = 'AgentDependencyError';
+  }
+}
+
 export class RetryableJobError extends Error {
   readonly retryable = true;
 
@@ -40,6 +63,10 @@ export class IdempotencyConflictError extends Error {
   }
 }
 
-export function isRetryableJobError(error: unknown): error is RetryableJobError {
-  return error instanceof RetryableJobError;
+export function isRetryableJobError(
+  error: unknown,
+): error is RetryableJobError | AgentDependencyError {
+  return (
+    error instanceof RetryableJobError || (error instanceof AgentDependencyError && error.retryable)
+  );
 }

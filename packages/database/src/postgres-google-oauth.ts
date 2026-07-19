@@ -1,4 +1,6 @@
 import type {
+  GoogleConnectionCredential,
+  GoogleConnectionCredentialRepository,
   GoogleConnectionRecord,
   GoogleConnectionRepository,
   GoogleConnectionUpsertInput,
@@ -52,7 +54,9 @@ export class PostgresOAuthStateRepository implements OAuthStateRepository {
   }
 }
 
-export class PostgresGoogleConnectionRepository implements GoogleConnectionRepository {
+export class PostgresGoogleConnectionRepository
+  implements GoogleConnectionRepository, GoogleConnectionCredentialRepository
+{
   constructor(private readonly database: Pick<DatabaseConnection, 'client'>) {}
 
   async findByGoogleEmail(email: string): Promise<GoogleConnectionRecord | null> {
@@ -66,6 +70,34 @@ export class PostgresGoogleConnectionRepository implements GoogleConnectionRepos
       LIMIT 1
     `) as Array<{ encrypted_refresh_token: string }>;
     return connection ? { encryptedRefreshToken: connection.encrypted_refresh_token } : null;
+  }
+
+  async findCredentialById(connectionId: string): Promise<GoogleConnectionCredential | null> {
+    const [connection] = (await this.database.client`
+      SELECT encrypted_refresh_token, granted_scopes
+      FROM connections
+      WHERE id = ${connectionId}::uuid
+        AND type = 'google'
+        AND status = 'connected'
+        AND encrypted_refresh_token IS NOT NULL
+      LIMIT 1
+    `) as Array<{ encrypted_refresh_token: string; granted_scopes: string[] | null }>;
+    return connection
+      ? {
+          encryptedRefreshToken: connection.encrypted_refresh_token,
+          grantedScopes: connection.granted_scopes ?? [],
+        }
+      : null;
+  }
+
+  async markReauthRequired(connectionId: string): Promise<void> {
+    await this.database.client`
+      UPDATE connections
+      SET status = 'reauth_required', updated_at = NOW()
+      WHERE id = ${connectionId}::uuid
+        AND type = 'google'
+        AND status = 'connected'
+    `;
   }
 
   async upsert(input: GoogleConnectionUpsertInput): Promise<GoogleConnectionRecord | null> {

@@ -4,6 +4,7 @@ import {
   createHash,
   randomBytes as nodeRandomBytes,
 } from 'node:crypto';
+import { AgentDependencyError } from '@ai-agents/agent-core';
 
 export const googleOAuthScopes = [
   'openid',
@@ -112,9 +113,194 @@ export interface GoogleConnectionRepository {
   upsert(input: GoogleConnectionUpsertInput): Promise<GoogleConnectionRecord | null>;
 }
 
+export interface GoogleConnectionCredential {
+  readonly encryptedRefreshToken: string;
+  readonly grantedScopes: readonly string[];
+}
+
+/** Runtime-only persistence boundary for a connected Google account. */
+export interface GoogleConnectionCredentialRepository {
+  findCredentialById(connectionId: string): Promise<GoogleConnectionCredential | null>;
+  markReauthRequired(connectionId: string): Promise<void>;
+}
+
+export interface GoogleAccessTokenProvider {
+  getAccessToken(connectionId: string): Promise<string>;
+  invalidateAccessToken(connectionId: string): void;
+}
+
+export interface GoogleRefreshedAccessToken {
+  readonly accessToken: string;
+  readonly expiresInSeconds: number;
+}
+
+export interface GoogleTokenRefresher {
+  refreshAccessToken(refreshToken: string): Promise<GoogleRefreshedAccessToken>;
+}
+
+export type GoogleRefreshFailureCode =
+  | 'INVALID_GRANT'
+  | 'PERMISSION_DENIED'
+  | 'TEMPORARY_UNAVAILABLE'
+  | 'UNKNOWN';
+
+/** Intentionally contains no provider response body or credential value. */
+export class GoogleRefreshTokenError extends Error {
+  constructor(
+    readonly code: GoogleRefreshFailureCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'GoogleRefreshTokenError';
+  }
+}
+
 export interface TokenCipher {
   decrypt(ciphertext: string): string;
   encrypt(plaintext: string): string;
+}
+
+export interface GoogleAccessTokenServiceOptions {
+  readonly cipher: TokenCipher;
+  readonly credentials: GoogleConnectionCredentialRepository;
+  readonly now?: () => Date;
+  readonly refreshSkewMs?: number;
+  readonly refresher: GoogleTokenRefresher;
+}
+
+/**
+ * Obtains short-lived Google access tokens from encrypted, persisted refresh tokens.
+ * Access tokens remain process-local and are never persisted.
+ */
+export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
+  readonly #cachedTokens = new Map<string, { accessToken: string; expiresAt: number }>();
+  readonly #inFlightRefreshes = new Map<string, Promise<string>>();
+  readonly #now: () => Date;
+  readonly #refreshSkewMs: number;
+
+  constructor(private readonly options: GoogleAccessTokenServiceOptions) {
+    this.#now = options.now ?? (() => new Date());
+    this.#refreshSkewMs = options.refreshSkewMs ?? 60_000;
+    if (!Number.isSafeInteger(this.#refreshSkewMs) || this.#refreshSkewMs < 0) {
+      throw new Error('Google access token refresh skew must be a non-negative integer');
+    }
+  }
+
+  async getAccessToken(connectionId: string): Promise<string> {
+    const cached = this.#cachedTokens.get(connectionId);
+    if (cached && cached.expiresAt - this.#refreshSkewMs > this.#now().getTime()) {
+      return cached.accessToken;
+    }
+
+    const existing = this.#inFlightRefreshes.get(connectionId);
+    if (existing) {
+      return existing;
+    }
+
+    const refresh = this.#refresh(connectionId);
+    this.#inFlightRefreshes.set(connectionId, refresh);
+    try {
+      return await refresh;
+    } finally {
+      this.#inFlightRefreshes.delete(connectionId);
+    }
+  }
+
+  invalidateAccessToken(connectionId: string): void {
+    this.#cachedTokens.delete(connectionId);
+  }
+
+  async #refresh(connectionId: string): Promise<string> {
+    const credential = await this.options.credentials.findCredentialById(connectionId);
+    if (!credential) {
+      throw new AgentDependencyError(
+        'AUTHENTICATION_REQUIRED',
+        false,
+        'Google connection is unavailable or requires reauthorization',
+      );
+    }
+    if (!credential.grantedScopes.includes('https://www.googleapis.com/auth/gmail.readonly')) {
+      throw new AgentDependencyError(
+        'PERMISSION_DENIED',
+        false,
+        'Google connection does not grant Gmail read access',
+      );
+    }
+
+    let refreshToken: string;
+    try {
+      refreshToken = this.options.cipher.decrypt(credential.encryptedRefreshToken);
+    } catch (error) {
+      throw new AgentDependencyError(
+        'AUTHENTICATION_REQUIRED',
+        false,
+        'Google connection requires reauthorization',
+        { cause: error },
+      );
+    }
+
+    try {
+      const token = await this.options.refresher.refreshAccessToken(refreshToken);
+      if (
+        !token.accessToken ||
+        !Number.isSafeInteger(token.expiresInSeconds) ||
+        token.expiresInSeconds <= 0
+      ) {
+        throw new GoogleRefreshTokenError(
+          'UNKNOWN',
+          'Google returned an invalid access token response',
+        );
+      }
+      this.#cachedTokens.set(connectionId, {
+        accessToken: token.accessToken,
+        expiresAt: this.#now().getTime() + token.expiresInSeconds * 1000,
+      });
+      return token.accessToken;
+    } catch (error) {
+      if (error instanceof GoogleRefreshTokenError && error.code === 'INVALID_GRANT') {
+        try {
+          await this.options.credentials.markReauthRequired(connectionId);
+        } catch (persistenceError) {
+          throw new AgentDependencyError(
+            'TEMPORARY_UNAVAILABLE',
+            true,
+            'Google connection status could not be updated',
+            { cause: persistenceError },
+          );
+        }
+        throw new AgentDependencyError(
+          'AUTHENTICATION_REQUIRED',
+          false,
+          'Google connection requires reauthorization',
+          { cause: error },
+        );
+      }
+      if (error instanceof GoogleRefreshTokenError && error.code === 'PERMISSION_DENIED') {
+        throw new AgentDependencyError(
+          'PERMISSION_DENIED',
+          false,
+          'Google token refresh was denied',
+          {
+            cause: error,
+          },
+        );
+      }
+      if (error instanceof GoogleRefreshTokenError && error.code === 'TEMPORARY_UNAVAILABLE') {
+        throw new AgentDependencyError(
+          'TEMPORARY_UNAVAILABLE',
+          true,
+          'Google token service is temporarily unavailable',
+          { cause: error },
+        );
+      }
+      if (error instanceof AgentDependencyError) {
+        throw error;
+      }
+      throw new AgentDependencyError('UNKNOWN', false, 'Google token refresh failed', {
+        cause: error,
+      });
+    }
+  }
 }
 
 export class AesGcmTokenCipher implements TokenCipher {
@@ -383,6 +569,76 @@ export class HttpGoogleOAuthProvider implements GoogleOAuthProvider {
       return { body, ok: response.ok };
     } catch {
       throw new GoogleOAuthError('OAUTH_PROVIDER_FAILURE', 'Google request failed');
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+/** Minimal REST adapter for the OAuth refresh-token grant. */
+export class HttpGoogleTokenRefresher implements GoogleTokenRefresher {
+  constructor(
+    private readonly config: Pick<GoogleOAuthConfig, 'clientId' | 'clientSecret'>,
+    private readonly fetchImplementation: typeof fetch = fetch,
+    private readonly timeoutMs = 10_000,
+  ) {
+    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0) {
+      throw new Error('Google token refresh timeout must be a positive integer');
+    }
+  }
+
+  async refreshAccessToken(refreshToken: string): Promise<GoogleRefreshedAccessToken> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await this.fetchImplementation(tokenEndpoint, {
+        body: new URLSearchParams({
+          client_id: this.config.clientId,
+          client_secret: this.config.clientSecret,
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+        }),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        method: 'POST',
+        signal: controller.signal,
+      });
+      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!response.ok) {
+        const providerError = typeof body?.error === 'string' ? body.error : '';
+        if (providerError === 'invalid_grant') {
+          throw new GoogleRefreshTokenError('INVALID_GRANT', 'Google refresh token is invalid');
+        }
+        if (response.status === 401 || response.status === 403) {
+          throw new GoogleRefreshTokenError('PERMISSION_DENIED', 'Google token refresh was denied');
+        }
+        if (response.status === 429 || response.status >= 500) {
+          throw new GoogleRefreshTokenError(
+            'TEMPORARY_UNAVAILABLE',
+            'Google token service is temporarily unavailable',
+          );
+        }
+        throw new GoogleRefreshTokenError('UNKNOWN', 'Google token refresh failed');
+      }
+      if (
+        !body ||
+        typeof body.access_token !== 'string' ||
+        typeof body.expires_in !== 'number' ||
+        !Number.isFinite(body.expires_in)
+      ) {
+        throw new GoogleRefreshTokenError(
+          'UNKNOWN',
+          'Google returned an invalid access token response',
+        );
+      }
+      return { accessToken: body.access_token, expiresInSeconds: Math.floor(body.expires_in) };
+    } catch (error) {
+      if (error instanceof GoogleRefreshTokenError) {
+        throw error;
+      }
+      throw new GoogleRefreshTokenError(
+        'TEMPORARY_UNAVAILABLE',
+        'Google token service is temporarily unavailable',
+      );
     } finally {
       clearTimeout(timeout);
     }
