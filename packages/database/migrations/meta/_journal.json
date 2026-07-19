@@ -50,6 +50,13 @@
       "when": 1784449584348,
       "tag": "0006_supreme_red_hulk",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784469329391,
+      "tag": "0007_parched_tana_nile",
+      "breakpoints": true
     }
   ]
 }

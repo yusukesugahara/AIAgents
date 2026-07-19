@@ -89,6 +89,7 @@
       "dependencies": {
         "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/google-oauth": "workspace:*",
+        "@ai-agents/llm": "workspace:*",
         "drizzle-orm": "^0.44.4",
         "postgres": "^3.4.7",
       },
@@ -103,6 +104,15 @@
         "@ai-agents/agent-core": "workspace:*",
       },
     },
+    "packages/llm": {
+      "name": "@ai-agents/llm",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ai-agents/agent-core": "workspace:*",
+        "openai": "^6.26.0",
+        "zod": "^4.3.6",
+      },
+    },
     "packages/observability": {
       "name": "@ai-agents/observability",
       "version": "0.1.0",
@@ -110,6 +120,10 @@
     "packages/testing": {
       "name": "@ai-agents/testing",
       "version": "0.1.0",
+      "dependencies": {
+        "@ai-agents/llm": "workspace:*",
+        "zod": "^4.3.6",
+      },
     },
   },
   "packages": {
@@ -132,6 +146,8 @@
     "@ai-agents/google-oauth": ["@ai-agents/google-oauth@workspace:packages/google-oauth"],
 
     "@ai-agents/job-search-email": ["@ai-agents/job-search-email@workspace:agents/job-search-email"],
+
+    "@ai-agents/llm": ["@ai-agents/llm@workspace:packages/llm"],
 
     "@ai-agents/observability": ["@ai-agents/observability@workspace:packages/observability"],
 
@@ -234,6 +250,8 @@
     "get-tsconfig": ["get-tsconfig@4.14.0", "", { "dependencies": { "resolve-pkg-maps": "^1.0.0" } }, "sha512-yTb+8DXzDREzgvYmh6s9vHsSVCHeC0G3PI5bEXNBHtmshPnO+S5O7qgLEOn0I5QvMy6kpZN8K1NKGyilLb93wA=="],
 
     "hono": ["hono@4.12.30", "", {}, "sha512-emn+JoJjrN9YTpRDS5it/UI2SO9BAE37T6I3d963RxcZ81G9A4pr2SZTEiiaiKbzx+NKRg5BZ89fCL7gCJCUog=="],
+
+    "openai": ["openai@6.48.0", "", { "peerDependencies": { "@aws-sdk/credential-provider-node": ">=3.972.0 <4", "@smithy/hash-node": ">=4.3.0 <5", "@smithy/signature-v4": ">=5.4.0 <6", "ws": "^8.18.0", "zod": "^3.25 || ^4.0" }, "optionalPeers": ["@aws-sdk/credential-provider-node", "@smithy/hash-node", "@smithy/signature-v4", "ws", "zod"] }, "sha512-KhVp+FyV50QrXNextvL9hIU5l6ox5HYuKQjGVk7lIqprgJol90+dQXWONV6S1lRWsKA1bXjrow8RsUT14M1hNA=="],
 
     "postgres": ["postgres@3.4.9", "", {}, "sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw=="],
 

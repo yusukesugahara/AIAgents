@@ -10,6 +10,7 @@ export {
 } from './postgres-google-oauth';
 export type { PostgresJobQueueOptions } from './postgres-job-queue';
 export { PostgresAgentRunRepository, PostgresJobQueue } from './postgres-job-queue';
+export { PostgresLlmInvocationRepository } from './postgres-llm-invocation';
 export * from './schema';
 export type { CreateDatabaseConnectionOptions, DatabaseConnection };
 export { createDatabaseConnection };

@@ -52,6 +52,7 @@ export function createDatabaseConnection(
           to_regclass('public.agent_jobs') IS NOT NULL
           AND to_regclass('public.agent_runs') IS NOT NULL
           AND to_regclass('public.agent_errors') IS NOT NULL
+          AND to_regclass('public.llm_invocations') IS NOT NULL
           AND to_regclass('public.oauth_authorization_states') IS NOT NULL
           AND to_regclass('public.agent_jobs_agent_id_idempotency_key_unique') IS NOT NULL
           AND to_regclass('public.connections_user_id_type_google_email_unique') IS NOT NULL

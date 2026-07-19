@@ -8,6 +8,7 @@ import {
   PostgresAgentRunRepository,
   PostgresGoogleConnectionRepository,
   PostgresJobQueue,
+  PostgresLlmInvocationRepository,
   PostgresOAuthStateRepository,
 } from './index';
 
@@ -102,6 +103,8 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
             AND google_email = 'migration@example.com'
         `) as Array<{ encrypted_refresh_token: string | null }>;
         expect(rows).toEqual([{ encrypted_refresh_token: 'usable-ciphertext' }]);
+        expect(await temporary.isSchemaReady()).toBe(false);
+        await applyMigrationFile(temporary, '0007_parched_tana_nile.sql');
         expect(await temporary.isSchemaReady()).toBe(true);
       } finally {
         if (temporary) {
@@ -708,6 +711,102 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           DELETE FROM agent_errors
           WHERE run_id IN (${completedRunId}::uuid, ${failedRunId}::uuid, ${abandonedRunId}::uuid)
         `;
+        await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.close();
+      }
+    });
+
+    test('persists LLM invocation metadata without prompt or generated content', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection);
+      const runs = new PostgresAgentRunRepository(connection);
+      const invocations = new PostgresLlmInvocationRepository(connection);
+      const idempotencyKey = `llm-${crypto.randomUUID()}`;
+      const runId = crypto.randomUUID();
+      const now = new Date();
+
+      try {
+        const job = await queue.enqueue({
+          agentId: 'test-agent',
+          input: { source: 'llm-integration' },
+          triggerType: 'manual',
+          idempotencyKey,
+        });
+        await runs.startRun({
+          runId,
+          jobId: job.id,
+          agentId: 'test-agent',
+          triggerType: 'queue',
+          input: { source: 'llm-integration' },
+          startedAt: now,
+        });
+        await invocations.recordInvocation({
+          attempt: 1,
+          createdAt: now,
+          durationMs: 125,
+          estimatedCostUsd: 0.0055,
+          inputTokens: 1_000,
+          model: 'gpt-5.6-terra',
+          outcome: 'completed',
+          outputTokens: 200,
+          promptVersion: 'email-analysis.v1',
+          provider: 'openai',
+          reviewReason: null,
+          runId,
+          schemaName: 'email_analysis',
+          schemaVersion: '1',
+          totalTokens: 1_200,
+        });
+
+        const [invocation] = (await connection.client`
+          SELECT
+            provider,
+            model,
+            prompt_version,
+            schema_name,
+            schema_version,
+            attempt,
+            outcome,
+            review_reason,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            estimated_cost_usd,
+            duration_ms
+          FROM llm_invocations
+          WHERE run_id = ${runId}::uuid
+        `) as Array<{
+          attempt: number;
+          duration_ms: number;
+          estimated_cost_usd: string | null;
+          input_tokens: number;
+          model: string;
+          outcome: string;
+          output_tokens: number;
+          prompt_version: string;
+          provider: string;
+          review_reason: string | null;
+          schema_name: string;
+          schema_version: string;
+          total_tokens: number;
+        }>;
+        expect(invocation).toEqual({
+          attempt: 1,
+          duration_ms: 125,
+          estimated_cost_usd: '0.00550000',
+          input_tokens: 1_000,
+          model: 'gpt-5.6-terra',
+          outcome: 'completed',
+          output_tokens: 200,
+          prompt_version: 'email-analysis.v1',
+          provider: 'openai',
+          review_reason: null,
+          schema_name: 'email_analysis',
+          schema_version: '1',
+          total_tokens: 1_200,
+        });
+      } finally {
+        await connection.client`DELETE FROM agent_runs WHERE id = ${runId}::uuid`;
         await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
         await connection.close();
       }

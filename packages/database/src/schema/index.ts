@@ -4,6 +4,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
   text,
@@ -152,6 +153,31 @@ export const agentRunSteps = pgTable('agent_run_steps', {
   completedAt: timestamp('completed_at', { withTimezone: true }),
 });
 
+export const llmInvocations = pgTable(
+  'llm_invocations',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    promptVersion: text('prompt_version').notNull(),
+    schemaName: text('schema_name').notNull(),
+    schemaVersion: text('schema_version').notNull(),
+    attempt: integer('attempt').notNull(),
+    outcome: text('outcome').notNull(),
+    reviewReason: text('review_reason'),
+    inputTokens: integer('input_tokens').notNull(),
+    outputTokens: integer('output_tokens').notNull(),
+    totalTokens: integer('total_tokens').notNull(),
+    estimatedCostUsd: numeric('estimated_cost_usd', { precision: 12, scale: 8 }),
+    durationMs: integer('duration_ms').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('llm_invocations_run_id_created_at_idx').on(table.runId, table.createdAt)],
+);
+
 export const agentErrors = pgTable(
   'agent_errors',
   {
@@ -197,11 +223,19 @@ export const agentRunsRelations = relations(agentRuns, ({ one, many }) => ({
     references: [agentJobs.id],
   }),
   steps: many(agentRunSteps),
+  llmInvocations: many(llmInvocations),
 }));
 
 export const agentRunStepsRelations = relations(agentRunSteps, ({ one }) => ({
   run: one(agentRuns, {
     fields: [agentRunSteps.runId],
+    references: [agentRuns.id],
+  }),
+}));
+
+export const llmInvocationsRelations = relations(llmInvocations, ({ one }) => ({
+  run: one(agentRuns, {
+    fields: [llmInvocations.runId],
     references: [agentRuns.id],
   }),
 }));
