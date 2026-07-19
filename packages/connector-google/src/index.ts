@@ -82,7 +82,7 @@ const messagePartSchema: z.ZodType<RawMessagePart> = z.lazy(() =>
 const messageSchema = z
   .object({
     id: z.string().min(1),
-    internalDate: z.string().optional(),
+    internalDate: z.string().regex(/^\d+$/u).optional(),
     labelIds: z.array(z.string()).optional(),
     payload: messagePartSchema.optional(),
     threadId: z.string().min(1),
@@ -133,7 +133,7 @@ export class HttpGmailReader implements GmailReader {
     readonly pageToken?: string;
     readonly query?: string;
   }): Promise<GmailMessagePage> {
-    requireIdentifier(input.googleConnectionId, 'Google connection ID');
+    requireUuid(input.googleConnectionId);
     const maxResults = input.maxResults ?? 100;
     if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 100) {
       throw new AgentDependencyError(
@@ -162,7 +162,7 @@ export class HttpGmailReader implements GmailReader {
     readonly googleConnectionId: string;
     readonly gmailMessageId: string;
   }): Promise<EmailMessage> {
-    requireIdentifier(input.googleConnectionId, 'Google connection ID');
+    requireUuid(input.googleConnectionId);
     requireIdentifier(input.gmailMessageId, 'Gmail message ID');
     return this.#withAccessToken(input.googleConnectionId, async (accessToken) => {
       const raw = parseGmailResponse(
@@ -182,7 +182,7 @@ export class HttpGmailReader implements GmailReader {
     readonly googleConnectionId: string;
     readonly gmailThreadId: string;
   }): Promise<EmailThread> {
-    requireIdentifier(input.googleConnectionId, 'Google connection ID');
+    requireUuid(input.googleConnectionId);
     requireIdentifier(input.gmailThreadId, 'Gmail thread ID');
     return this.#withAccessToken(input.googleConnectionId, async (accessToken) => {
       const raw = parseGmailResponse(
@@ -194,9 +194,10 @@ export class HttpGmailReader implements GmailReader {
           accessToken,
         ),
       );
-      const messages = await Promise.all(
-        (raw.messages ?? []).map((message) => this.#normalizeMessage(message, accessToken)),
-      );
+      const messages: EmailMessage[] = [];
+      for (const message of raw.messages ?? []) {
+        messages.push(await this.#normalizeMessage(message, accessToken));
+      }
       messages.sort((left, right) => left.sentAt.getTime() - right.sentAt.getTime());
       return { id: raw.id, messages };
     });
@@ -239,8 +240,9 @@ export class HttpGmailReader implements GmailReader {
         'Gmail message is missing required content',
       );
     }
-    const sentAt = new Date(Number(raw.internalDate));
-    if (Number.isNaN(sentAt.getTime())) {
+    const internalDate = Number(raw.internalDate);
+    const sentAt = new Date(internalDate);
+    if (!Number.isSafeInteger(internalDate) || Number.isNaN(sentAt.getTime())) {
       throw new AgentDependencyError(
         'INVALID_RESPONSE',
         false,
@@ -248,8 +250,7 @@ export class HttpGmailReader implements GmailReader {
       );
     }
     const parts = await this.#collectTextParts(raw.id, raw.payload, accessToken);
-    const selected =
-      parts.plain.length > 0 ? parts.plain.join('\n\n') : parts.html.map(htmlToText).join('\n\n');
+    const selected = parts.text.join('\n\n');
     const body = truncateText(normalizeText(selected), this.#bodyLimitBytes);
     const headers = readHeaders(raw.payload.headers ?? []);
     return {
@@ -273,34 +274,49 @@ export class HttpGmailReader implements GmailReader {
     gmailMessageId: string,
     part: RawMessagePart,
     accessToken: string,
-  ): Promise<{ html: string[]; plain: string[] }> {
-    const result = { html: [] as string[], plain: [] as string[] };
-    const collect = async (current: RawMessagePart): Promise<void> => {
-      if (current.filename) {
-        return;
+  ): Promise<{ containsPlain: boolean; text: string[] }> {
+    if (
+      part.filename ||
+      /^\s*attachment(?:\s*;|\s*$)/iu.test(
+        readHeader(part.headers ?? [], 'content-disposition') ?? '',
+      )
+    ) {
+      return { containsPlain: false, text: [] };
+    }
+    const mimeType = part.mimeType?.toLowerCase();
+    if (mimeType === 'text/plain' || mimeType === 'text/html') {
+      const data =
+        part.body?.data ??
+        (part.body?.attachmentId
+          ? await this.#getAttachment(gmailMessageId, part.body.attachmentId, accessToken)
+          : undefined);
+      if (!data) {
+        return { containsPlain: mimeType === 'text/plain', text: [] };
       }
-      const mimeType = current.mimeType?.toLowerCase();
-      if (mimeType === 'text/plain' || mimeType === 'text/html') {
-        const data =
-          current.body?.data ??
-          (current.body?.attachmentId
-            ? await this.#getAttachment(gmailMessageId, current.body.attachmentId, accessToken)
-            : undefined);
-        if (data) {
-          const text = decodeBase64Url(data);
-          if (mimeType === 'text/plain') {
-            result.plain.push(text);
-          } else {
-            result.html.push(text);
-          }
-        }
-      }
-      for (const child of current.parts ?? []) {
-        await collect(child);
-      }
+      const decoded = decodeBase64Url(
+        data,
+        readMimeCharset(readHeader(part.headers ?? [], 'content-type')),
+      );
+      return {
+        containsPlain: mimeType === 'text/plain',
+        text: [mimeType === 'text/html' ? htmlToText(decoded) : decoded],
+      };
+    }
+
+    const children = [];
+    for (const child of part.parts ?? []) {
+      children.push(await this.#collectTextParts(gmailMessageId, child, accessToken));
+    }
+    if (mimeType === 'multipart/alternative') {
+      return (
+        children.find((child) => child.containsPlain && child.text.length > 0) ??
+        children.find((child) => child.text.length > 0) ?? { containsPlain: false, text: [] }
+      );
+    }
+    return {
+      containsPlain: children.some((child) => child.containsPlain),
+      text: children.flatMap((child) => child.text),
     };
-    await collect(part);
-    return result;
   }
 
   async #getAttachment(
@@ -374,7 +390,7 @@ function toGmailError(status: number, body: unknown): AgentDependencyError {
   ) {
     return new AgentDependencyError('RATE_LIMITED', true, 'Gmail rate limit was exceeded');
   }
-  if (status >= 500) {
+  if (status === 408 || status >= 500) {
     return new AgentDependencyError(
       'TEMPORARY_UNAVAILABLE',
       true,
@@ -416,7 +432,7 @@ function extractGoogleErrorReasons(body: unknown): string[] {
   );
 }
 
-function decodeBase64Url(value: string): string {
+function decodeBase64Url(value: string, charset = 'utf-8'): string {
   try {
     if (!/^[A-Za-z0-9_-]*$/u.test(value) || value.length % 4 === 1) {
       throw new Error('Invalid Base64URL');
@@ -425,7 +441,7 @@ function decodeBase64Url(value: string): string {
     if (decoded.length === 0 && value.length > 0) {
       throw new Error('Invalid Base64URL');
     }
-    return decoded.toString('utf8');
+    return new TextDecoder(charset, { fatal: true }).decode(decoded);
   } catch (error) {
     throw new AgentDependencyError('INVALID_RESPONSE', false, 'Gmail message body is invalid', {
       cause: error,
@@ -440,19 +456,124 @@ function readHeaders(
   for (const header of headers) {
     const name = header.name.trim().toLowerCase();
     if (name && !values.has(name)) {
-      values.set(name, header.value.trim());
+      values.set(name, decodeMimeHeader(header.value.trim()));
     }
   }
   return values;
 }
 
-function splitAddresses(value: string | undefined): string[] {
+function readHeader(
+  headers: readonly { readonly name: string; readonly value: string }[],
+  expectedName: string,
+): string | undefined {
+  return headers.find((header) => header.name.trim().toLowerCase() === expectedName)?.value;
+}
+
+function readMimeCharset(contentType: string | undefined): string {
+  if (!contentType) {
+    return 'utf-8';
+  }
+  const match = /(?:^|;)\s*charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\s]+))/iu.exec(contentType);
+  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? 'utf-8').trim();
+}
+
+function decodeMimeHeader(value: string): string {
   return value
-    ? value
-        .split(',')
-        .map((address) => address.trim())
-        .filter(Boolean)
-    : [];
+    .replace(/\r?\n[\t ]+/gu, ' ')
+    .replace(/\?=\s+=\?/gu, '?==?')
+    .replace(
+      /=\?([^?]+)\?([bq])\?([^?]*)\?=/giu,
+      (_match, charset: string, encoding: string, encoded: string) => {
+        try {
+          const bytes =
+            encoding.toLowerCase() === 'b'
+              ? Buffer.from(encoded, 'base64')
+              : decodeQuotedPrintableHeader(encoded);
+          return new TextDecoder(charset, { fatal: true }).decode(bytes);
+        } catch {
+          return _match;
+        }
+      },
+    );
+}
+
+function decodeQuotedPrintableHeader(value: string): Uint8Array {
+  const bytes: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === '_') {
+      bytes.push(0x20);
+      continue;
+    }
+    if (character === '=' && /^[0-9a-f]{2}$/iu.test(value.slice(index + 1, index + 3))) {
+      bytes.push(Number.parseInt(value.slice(index + 1, index + 3), 16));
+      index += 2;
+      continue;
+    }
+    bytes.push(value.charCodeAt(index));
+  }
+  return Uint8Array.from(bytes);
+}
+
+function splitAddresses(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  const addresses: string[] = [];
+  let start = 0;
+  let quoted = false;
+  let escaped = false;
+  let angleDepth = 0;
+  let commentDepth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\' && quoted) {
+      escaped = true;
+      continue;
+    }
+    if (character === '"' && commentDepth === 0) {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) {
+      continue;
+    }
+    if (character === '(') {
+      commentDepth += 1;
+      continue;
+    }
+    if (character === ')' && commentDepth > 0) {
+      commentDepth -= 1;
+      continue;
+    }
+    if (commentDepth > 0) {
+      continue;
+    }
+    if (character === '<') {
+      angleDepth += 1;
+      continue;
+    }
+    if (character === '>' && angleDepth > 0) {
+      angleDepth -= 1;
+      continue;
+    }
+    if (character === ',' && angleDepth === 0) {
+      const address = value.slice(start, index).trim();
+      if (address) {
+        addresses.push(address);
+      }
+      start = index + 1;
+    }
+  }
+  const finalAddress = value.slice(start).trim();
+  if (finalAddress) {
+    addresses.push(finalAddress);
+  }
+  return addresses;
 }
 
 function normalizeText(value: string): string {
@@ -479,7 +600,12 @@ function htmlToText(value: string): string {
       /&#(?:x([0-9a-f]+)|([0-9]+));/giu,
       (_match, hex: string | undefined, decimal: string | undefined) => {
         const codePoint = Number.parseInt(hex ?? decimal ?? '', hex ? 16 : 10);
-        return Number.isSafeInteger(codePoint) ? String.fromCodePoint(codePoint) : '';
+        return Number.isSafeInteger(codePoint) &&
+          codePoint >= 0 &&
+          codePoint <= 0x10ffff &&
+          (codePoint < 0xd800 || codePoint > 0xdfff)
+          ? String.fromCodePoint(codePoint)
+          : _match;
       },
     );
 }
@@ -489,11 +615,30 @@ function truncateText(value: string, maximumBytes: number): { text: string; trun
   if (bytes.length <= maximumBytes) {
     return { text: value, truncated: false };
   }
-  return { text: bytes.subarray(0, maximumBytes).toString('utf8').trimEnd(), truncated: true };
+  let end = maximumBytes;
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  while (end > 0) {
+    try {
+      return { text: decoder.decode(bytes.subarray(0, end)).trimEnd(), truncated: true };
+    } catch {
+      end -= 1;
+    }
+  }
+  return { text: '', truncated: true };
 }
 
 function requireIdentifier(value: string, label: string): void {
   if (!value.trim()) {
     throw new AgentDependencyError('INVALID_REQUEST', false, `${label} must not be empty`);
+  }
+}
+
+function requireUuid(value: string): void {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)) {
+    throw new AgentDependencyError(
+      'INVALID_REQUEST',
+      false,
+      'Google connection ID must be a valid UUID',
+    );
   }
 }

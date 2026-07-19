@@ -259,7 +259,19 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           encryptedRefreshToken: 'tampered-ciphertext',
           grantedScopes: ['original-scope'],
         });
-        await connections.markReauthRequired(stored.id);
+        expect(
+          await connections.markReauthRequired({
+            connectionId: stored.id,
+            expectedEncryptedRefreshToken: 'stale-ciphertext',
+          }),
+        ).toBe(false);
+        expect(await connections.findCredentialById(stored.id)).not.toBeNull();
+        expect(
+          await connections.markReauthRequired({
+            connectionId: stored.id,
+            expectedEncryptedRefreshToken: 'tampered-ciphertext',
+          }),
+        ).toBe(true);
         expect(await connections.findCredentialById(stored.id)).toBeNull();
         const [reauth] = (await connection.client`
           SELECT status FROM connections WHERE id = ${stored.id}::uuid

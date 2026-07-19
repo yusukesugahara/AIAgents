@@ -121,7 +121,10 @@ export interface GoogleConnectionCredential {
 /** Runtime-only persistence boundary for a connected Google account. */
 export interface GoogleConnectionCredentialRepository {
   findCredentialById(connectionId: string): Promise<GoogleConnectionCredential | null>;
-  markReauthRequired(connectionId: string): Promise<void>;
+  markReauthRequired(input: {
+    readonly connectionId: string;
+    readonly expectedEncryptedRefreshToken: string;
+  }): Promise<boolean>;
 }
 
 export interface GoogleAccessTokenProvider {
@@ -140,6 +143,7 @@ export interface GoogleTokenRefresher {
 
 export type GoogleRefreshFailureCode =
   | 'INVALID_GRANT'
+  | 'INVALID_RESPONSE'
   | 'PERMISSION_DENIED'
   | 'TEMPORARY_UNAVAILABLE'
   | 'UNKNOWN';
@@ -187,6 +191,13 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
   }
 
   async getAccessToken(connectionId: string): Promise<string> {
+    if (!isUuid(connectionId)) {
+      throw new AgentDependencyError(
+        'INVALID_REQUEST',
+        false,
+        'Google connection ID must be a valid UUID',
+      );
+    }
     const cached = this.#cachedTokens.get(connectionId);
     if (cached && cached.expiresAt - this.#refreshSkewMs > this.#now().getTime()) {
       return cached.accessToken;
@@ -211,7 +222,17 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
   }
 
   async #refresh(connectionId: string): Promise<string> {
-    const credential = await this.options.credentials.findCredentialById(connectionId);
+    let credential: GoogleConnectionCredential | null;
+    try {
+      credential = await this.options.credentials.findCredentialById(connectionId);
+    } catch (error) {
+      throw new AgentDependencyError(
+        'TEMPORARY_UNAVAILABLE',
+        true,
+        'Google connection could not be loaded',
+        { cause: error },
+      );
+    }
     if (!credential) {
       throw new AgentDependencyError(
         'AUTHENTICATION_REQUIRED',
@@ -231,6 +252,7 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
     try {
       refreshToken = this.options.cipher.decrypt(credential.encryptedRefreshToken);
     } catch (error) {
+      await this.#markReauthRequired(connectionId, credential.encryptedRefreshToken);
       throw new AgentDependencyError(
         'AUTHENTICATION_REQUIRED',
         false,
@@ -247,7 +269,7 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
         token.expiresInSeconds <= 0
       ) {
         throw new GoogleRefreshTokenError(
-          'UNKNOWN',
+          'INVALID_RESPONSE',
           'Google returned an invalid access token response',
         );
       }
@@ -258,16 +280,7 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
       return token.accessToken;
     } catch (error) {
       if (error instanceof GoogleRefreshTokenError && error.code === 'INVALID_GRANT') {
-        try {
-          await this.options.credentials.markReauthRequired(connectionId);
-        } catch (persistenceError) {
-          throw new AgentDependencyError(
-            'TEMPORARY_UNAVAILABLE',
-            true,
-            'Google connection status could not be updated',
-            { cause: persistenceError },
-          );
-        }
+        await this.#markReauthRequired(connectionId, credential.encryptedRefreshToken);
         throw new AgentDependencyError(
           'AUTHENTICATION_REQUIRED',
           false,
@@ -293,12 +306,49 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
           { cause: error },
         );
       }
+      if (error instanceof GoogleRefreshTokenError && error.code === 'INVALID_RESPONSE') {
+        throw new AgentDependencyError(
+          'INVALID_RESPONSE',
+          false,
+          'Google token service returned an invalid response',
+          { cause: error },
+        );
+      }
       if (error instanceof AgentDependencyError) {
         throw error;
       }
       throw new AgentDependencyError('UNKNOWN', false, 'Google token refresh failed', {
         cause: error,
       });
+    }
+  }
+
+  async #markReauthRequired(
+    connectionId: string,
+    expectedEncryptedRefreshToken: string,
+  ): Promise<void> {
+    try {
+      const marked = await this.options.credentials.markReauthRequired({
+        connectionId,
+        expectedEncryptedRefreshToken,
+      });
+      if (!marked) {
+        throw new AgentDependencyError(
+          'TEMPORARY_UNAVAILABLE',
+          true,
+          'Google connection changed while its token was refreshed',
+        );
+      }
+    } catch (error) {
+      if (error instanceof AgentDependencyError) {
+        throw error;
+      }
+      throw new AgentDependencyError(
+        'TEMPORARY_UNAVAILABLE',
+        true,
+        'Google connection status could not be updated',
+        { cause: error },
+      );
     }
   }
 }
@@ -611,7 +661,7 @@ export class HttpGoogleTokenRefresher implements GoogleTokenRefresher {
         if (response.status === 401 || response.status === 403) {
           throw new GoogleRefreshTokenError('PERMISSION_DENIED', 'Google token refresh was denied');
         }
-        if (response.status === 429 || response.status >= 500) {
+        if (response.status === 408 || response.status === 429 || response.status >= 500) {
           throw new GoogleRefreshTokenError(
             'TEMPORARY_UNAVAILABLE',
             'Google token service is temporarily unavailable',
@@ -626,7 +676,7 @@ export class HttpGoogleTokenRefresher implements GoogleTokenRefresher {
         !Number.isFinite(body.expires_in)
       ) {
         throw new GoogleRefreshTokenError(
-          'UNKNOWN',
+          'INVALID_RESPONSE',
           'Google returned an invalid access token response',
         );
       }
@@ -679,6 +729,10 @@ export function loadGoogleOAuthConfig(environment = process.env): GoogleOAuthCon
 
 function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value);
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
 }
 
 function sha256Base64Url(value: string): string {

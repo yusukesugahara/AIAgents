@@ -21,6 +21,7 @@ import {
 } from './index';
 
 const encryptionKey = Buffer.alloc(32, 7).toString('base64');
+const connectionId = '018f7f9a-7b2c-7abc-8def-0123456789ab';
 
 class FakeStates implements OAuthStateRepository {
   cleanupCalls = 0;
@@ -379,7 +380,7 @@ describe('Google OAuth', () => {
     expect(body).toContain('refresh_token=refresh-secret');
   });
 
-  test('classifies invalid grant and temporary token refresh failures', async () => {
+  test('classifies invalid grant, timeout, and malformed token refresh responses', async () => {
     const invalidGrant = new HttpGoogleTokenRefresher(
       { clientId: 'client-id', clientSecret: 'client-secret' },
       (async () =>
@@ -398,12 +399,30 @@ describe('Google OAuth', () => {
     await expect(unavailable.refreshAccessToken('refresh-secret')).rejects.toMatchObject({
       code: 'TEMPORARY_UNAVAILABLE',
     });
+
+    const timedOut = new HttpGoogleTokenRefresher(
+      { clientId: 'client-id', clientSecret: 'client-secret' },
+      (async () => new Response('{}', { status: 408 })) as unknown as typeof fetch,
+    );
+    await expect(timedOut.refreshAccessToken('refresh-secret')).rejects.toMatchObject({
+      code: 'TEMPORARY_UNAVAILABLE',
+    });
+
+    const malformed = new HttpGoogleTokenRefresher(
+      { clientId: 'client-id', clientSecret: 'client-secret' },
+      (async () => new Response('{}')) as unknown as typeof fetch,
+    );
+    await expect(malformed.refreshAccessToken('refresh-secret')).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+    });
   });
 });
 
 class FakeCredentials implements GoogleConnectionCredentialRepository {
   credential: GoogleConnectionCredential | null;
+  findFailure: Error | undefined;
   markFailure: Error | undefined;
+  markResult = true;
   readonly reauthRequired: string[] = [];
 
   constructor(credential: GoogleConnectionCredential | null) {
@@ -411,14 +430,21 @@ class FakeCredentials implements GoogleConnectionCredentialRepository {
   }
 
   async findCredentialById(): Promise<GoogleConnectionCredential | null> {
+    if (this.findFailure) {
+      throw this.findFailure;
+    }
     return this.credential;
   }
 
-  async markReauthRequired(connectionId: string): Promise<void> {
+  async markReauthRequired(input: {
+    readonly connectionId: string;
+    readonly expectedEncryptedRefreshToken: string;
+  }): Promise<boolean> {
     if (this.markFailure) {
       throw this.markFailure;
     }
-    this.reauthRequired.push(connectionId);
+    this.reauthRequired.push(input.connectionId);
+    return this.markResult;
   }
 }
 
@@ -426,6 +452,7 @@ class FakeRefresher {
   calls = 0;
   deferred: Promise<void> | undefined;
   failure: Error | undefined;
+  token = { accessToken: 'access-token', expiresInSeconds: 3600 };
 
   async refreshAccessToken() {
     this.calls += 1;
@@ -433,7 +460,7 @@ class FakeRefresher {
     if (this.failure) {
       throw this.failure;
     }
-    return { accessToken: `access-${this.calls}`, expiresInSeconds: 3600 };
+    return { ...this.token, accessToken: `access-${this.calls}` };
   }
 }
 
@@ -453,13 +480,13 @@ describe('Google access token service', () => {
     });
     const service = new GoogleAccessTokenService({ cipher, credentials, refresher });
 
-    const first = service.getAccessToken('connection-id');
-    const second = service.getAccessToken('connection-id');
+    const first = service.getAccessToken(connectionId);
+    const second = service.getAccessToken(connectionId);
     release?.();
 
     await expect(Promise.all([first, second])).resolves.toEqual(['access-1', 'access-1']);
     expect(refresher.calls).toBe(1);
-    await expect(service.getAccessToken('connection-id')).resolves.toBe('access-1');
+    await expect(service.getAccessToken(connectionId)).resolves.toBe('access-1');
     expect(refresher.calls).toBe(1);
   });
 
@@ -479,11 +506,11 @@ describe('Google access token service', () => {
       refresher,
     });
 
-    await service.getAccessToken('connection-id');
+    await service.getAccessToken(connectionId);
     now = new Date('2026-07-19T00:59:01.000Z');
-    await service.getAccessToken('connection-id');
-    service.invalidateAccessToken('connection-id');
-    await service.getAccessToken('connection-id');
+    await service.getAccessToken(connectionId);
+    service.invalidateAccessToken(connectionId);
+    await service.getAccessToken(connectionId);
     expect(refresher.calls).toBe(3);
   });
 
@@ -495,7 +522,7 @@ describe('Google access token service', () => {
         cipher,
         credentials: new FakeCredentials(null),
         refresher,
-      }).getAccessToken('missing'),
+      }).getAccessToken('018f7f9a-7b2c-7abc-8def-0123456789ac'),
     ).rejects.toMatchObject({ code: 'AUTHENTICATION_REQUIRED', retryable: false });
     await expect(
       new GoogleAccessTokenService({
@@ -505,7 +532,7 @@ describe('Google access token service', () => {
           grantedScopes: [],
         }),
         refresher,
-      }).getAccessToken('connection-id'),
+      }).getAccessToken(connectionId),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED', retryable: false });
   });
 
@@ -518,16 +545,29 @@ describe('Google access token service', () => {
     const refresher = new FakeRefresher();
     refresher.failure = new GoogleRefreshTokenError('INVALID_GRANT', 'invalid grant');
     const service = new GoogleAccessTokenService({ cipher, credentials, refresher });
-    await expect(service.getAccessToken('connection-id')).rejects.toMatchObject({
+    await expect(service.getAccessToken(connectionId)).rejects.toMatchObject({
       code: 'AUTHENTICATION_REQUIRED',
       retryable: false,
     });
-    expect(credentials.reauthRequired).toEqual(['connection-id']);
+    expect(credentials.reauthRequired).toEqual([connectionId]);
 
     refresher.failure = new GoogleRefreshTokenError('TEMPORARY_UNAVAILABLE', 'temporary');
-    await expect(service.getAccessToken('connection-id')).rejects.toMatchObject({
+    await expect(service.getAccessToken(connectionId)).rejects.toMatchObject({
       code: 'TEMPORARY_UNAVAILABLE',
       retryable: true,
+    });
+
+    refresher.failure = new GoogleRefreshTokenError('INVALID_RESPONSE', 'malformed');
+    await expect(service.getAccessToken(connectionId)).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+      retryable: false,
+    });
+
+    refresher.failure = undefined;
+    refresher.token.expiresInSeconds = 0;
+    await expect(service.getAccessToken(connectionId)).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+      retryable: false,
     });
   });
 
@@ -542,9 +582,59 @@ describe('Google access token service', () => {
     refresher.failure = new GoogleRefreshTokenError('INVALID_GRANT', 'invalid grant');
 
     await expect(
-      new GoogleAccessTokenService({ cipher, credentials, refresher }).getAccessToken(
-        'connection-id',
-      ),
+      new GoogleAccessTokenService({ cipher, credentials, refresher }).getAccessToken(connectionId),
+    ).rejects.toMatchObject({ code: 'TEMPORARY_UNAVAILABLE', retryable: true });
+  });
+
+  test('marks a connection with an unreadable refresh token for reauthorization', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const credentials = new FakeCredentials({
+      encryptedRefreshToken: 'corrupt-ciphertext',
+      grantedScopes: [gmailScope],
+    });
+
+    await expect(
+      new GoogleAccessTokenService({
+        cipher,
+        credentials,
+        refresher: new FakeRefresher(),
+      }).getAccessToken(connectionId),
+    ).rejects.toMatchObject({ code: 'AUTHENTICATION_REQUIRED', retryable: false });
+    expect(credentials.reauthRequired).toEqual([connectionId]);
+  });
+
+  test('rejects malformed connection IDs before persistence and retries persistence failures', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const credentials = new FakeCredentials(null);
+    const service = new GoogleAccessTokenService({
+      cipher,
+      credentials,
+      refresher: new FakeRefresher(),
+    });
+    await expect(service.getAccessToken('not-a-uuid')).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      retryable: false,
+    });
+
+    credentials.findFailure = new Error('database unavailable');
+    await expect(service.getAccessToken(connectionId)).rejects.toMatchObject({
+      code: 'TEMPORARY_UNAVAILABLE',
+      retryable: true,
+    });
+  });
+
+  test('retries instead of disabling a connection changed by concurrent reauthorization', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const credentials = new FakeCredentials({
+      encryptedRefreshToken: cipher.encrypt('old-refresh-secret'),
+      grantedScopes: [gmailScope],
+    });
+    credentials.markResult = false;
+    const refresher = new FakeRefresher();
+    refresher.failure = new GoogleRefreshTokenError('INVALID_GRANT', 'invalid grant');
+
+    await expect(
+      new GoogleAccessTokenService({ cipher, credentials, refresher }).getAccessToken(connectionId),
     ).rejects.toMatchObject({ code: 'TEMPORARY_UNAVAILABLE', retryable: true });
   });
 });

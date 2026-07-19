@@ -90,14 +90,20 @@ export class PostgresGoogleConnectionRepository
       : null;
   }
 
-  async markReauthRequired(connectionId: string): Promise<void> {
-    await this.database.client`
+  async markReauthRequired(input: {
+    readonly connectionId: string;
+    readonly expectedEncryptedRefreshToken: string;
+  }): Promise<boolean> {
+    const [updated] = (await this.database.client`
       UPDATE connections
       SET status = 'reauth_required', updated_at = NOW()
-      WHERE id = ${connectionId}::uuid
+      WHERE id = ${input.connectionId}::uuid
         AND type = 'google'
         AND status = 'connected'
-    `;
+        AND encrypted_refresh_token = ${input.expectedEncryptedRefreshToken}
+      RETURNING id
+    `) as Array<{ id: string }>;
+    return updated !== undefined;
   }
 
   async upsert(input: GoogleConnectionUpsertInput): Promise<GoogleConnectionRecord | null> {
