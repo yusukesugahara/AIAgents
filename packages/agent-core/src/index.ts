@@ -12,4 +12,13 @@ export type { AgentRunnerOptions, AgentRunRequest, AgentRunResult } from './agen
 export { AgentRunner } from './agent-runner';
 export { defineAgent } from './define-agent';
 export type { AgentCoreErrorCode } from './errors';
-export { AgentCoreError } from './errors';
+export { AgentCoreError, isRetryableJobError, RetryableJobError } from './errors';
+export type {
+  AgentJob,
+  AgentJobStatus,
+  ClaimNextJobInput,
+  CompleteJobInput,
+  EnqueueJobInput,
+  FailJobInput,
+  JobQueue,
+} from './job-queue';

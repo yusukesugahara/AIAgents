@@ -18,6 +18,7 @@ export interface AgentDefinition<TInput, TOutput> {
 
 export interface AgentRunStart {
   readonly runId: string;
+  readonly jobId: string;
   readonly agentId: string;
   readonly triggerType: string;
   readonly input: unknown;

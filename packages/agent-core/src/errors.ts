@@ -16,3 +16,16 @@ export class AgentCoreError extends Error {
     this.name = 'AgentCoreError';
   }
 }
+
+export class RetryableJobError extends Error {
+  readonly retryable = true;
+
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
+    this.name = 'RetryableJobError';
+  }
+}
+
+export function isRetryableJobError(error: unknown): error is RetryableJobError {
+  return error instanceof RetryableJobError;
+}

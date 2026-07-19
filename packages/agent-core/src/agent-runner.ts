@@ -1,10 +1,11 @@
 import type { AgentRunRepository } from './agent.types';
 import type { AgentContext } from './agent-context';
 import type { AgentRegistry } from './agent-registry';
-import { AgentCoreError } from './errors';
+import { AgentCoreError, RetryableJobError } from './errors';
 
 export interface AgentRunRequest {
   readonly agentId: string;
+  readonly jobId: string;
   readonly input: unknown;
   readonly triggerType: string;
 }
@@ -45,6 +46,7 @@ export class AgentRunner {
     const startedAt = this.#now();
     const context: AgentContext = {
       runId,
+      jobId: request.jobId,
       agentId: request.agentId,
       triggerType: request.triggerType,
       startedAt,
@@ -52,6 +54,7 @@ export class AgentRunner {
 
     await this.#persistStart({
       runId,
+      jobId: request.jobId,
       agentId: request.agentId,
       triggerType: request.triggerType,
       input: inputResult.data,
@@ -76,7 +79,7 @@ export class AgentRunner {
 
       await this.#persistFailure({
         runId,
-        errorCode: agentError.code,
+        errorCode: agentError instanceof AgentCoreError ? agentError.code : 'JOB_RETRYABLE',
         errorMessage: agentError.message,
         completedAt: this.#now(),
       });
@@ -119,8 +122,16 @@ export class AgentRunner {
     }
   }
 
-  #toExecutionError(agentId: string, runId: string, error: unknown): AgentCoreError {
+  #toExecutionError(
+    agentId: string,
+    runId: string,
+    error: unknown,
+  ): AgentCoreError | RetryableJobError {
     if (error instanceof AgentCoreError) {
+      return error;
+    }
+
+    if (error instanceof RetryableJobError) {
       return error;
     }
 

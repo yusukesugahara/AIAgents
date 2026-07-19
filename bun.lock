@@ -36,6 +36,7 @@
       "name": "@ai-agents/worker",
       "version": "0.1.0",
       "dependencies": {
+        "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/database": "workspace:*",
       },
     },
@@ -54,6 +55,7 @@
       "name": "@ai-agents/database",
       "version": "0.1.0",
       "dependencies": {
+        "@ai-agents/agent-core": "workspace:*",
         "drizzle-orm": "^0.44.4",
         "postgres": "^3.4.7",
       },

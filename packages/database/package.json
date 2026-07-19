@@ -11,6 +11,7 @@
     "db:studio": "bunx drizzle-kit studio"
   },
   "dependencies": {
+    "@ai-agents/agent-core": "workspace:*",
     "drizzle-orm": "^0.44.4",
     "postgres": "^3.4.7"
   },

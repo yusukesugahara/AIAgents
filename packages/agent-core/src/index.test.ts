@@ -90,7 +90,12 @@ describe('AgentRunner', () => {
     const { repository, runner } = createRunner();
 
     await expect(
-      runner.run({ agentId: 'test-agent', triggerType: 'manual', input: { greeting: 1 } }),
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'manual',
+        input: { greeting: 1 },
+      }),
     ).rejects.toMatchObject({ code: 'AGENT_INPUT_INVALID' });
     expect(repository.started).toHaveLength(0);
   });
@@ -99,11 +104,17 @@ describe('AgentRunner', () => {
     const { repository, runner } = createRunner();
 
     await expect(
-      runner.run({ agentId: 'test-agent', triggerType: 'manual', input: { greeting: 'Hello' } }),
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'manual',
+        input: { greeting: 'Hello' },
+      }),
     ).resolves.toEqual({ runId: 'run-123', output: { message: 'Hello' } });
     expect(repository.started).toEqual([
       {
         runId: 'run-123',
+        jobId: 'job-123',
         agentId: 'test-agent',
         triggerType: 'manual',
         input: { greeting: 'Hello' },
@@ -128,7 +139,12 @@ describe('AgentRunner', () => {
     );
 
     await expect(
-      runner.run({ agentId: 'test-agent', triggerType: 'manual', input: { greeting: 'Hello' } }),
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'manual',
+        input: { greeting: 'Hello' },
+      }),
     ).rejects.toMatchObject({ code: 'AGENT_EXECUTION_FAILED' });
     expect(repository.failed).toEqual([
       {
@@ -146,7 +162,12 @@ describe('AgentRunner', () => {
     );
 
     await expect(
-      runner.run({ agentId: 'test-agent', triggerType: 'manual', input: { greeting: 'Hello' } }),
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'manual',
+        input: { greeting: 'Hello' },
+      }),
     ).rejects.toMatchObject({ code: 'AGENT_OUTPUT_INVALID' });
     expect(repository.failed).toEqual([
       {

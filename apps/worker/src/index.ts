@@ -1,4 +1,10 @@
-import { createDatabaseConnection, type DatabaseConnection } from '@ai-agents/database';
+import { AgentRegistry, AgentRunner } from '@ai-agents/agent-core';
+import {
+  createDatabaseConnection,
+  type DatabaseConnection,
+  PostgresAgentRunRepository,
+  PostgresJobQueue,
+} from '@ai-agents/database';
 import { startWorker } from './worker';
 
 let database: DatabaseConnection | undefined;
@@ -14,7 +20,18 @@ try {
   );
 }
 
-const worker = await startWorker(database ? { database } : {});
+const worker = await startWorker(
+  database
+    ? {
+        database,
+        queue: new PostgresJobQueue(database),
+        runner: new AgentRunner({
+          registry: new AgentRegistry(),
+          repository: new PostgresAgentRunRepository(database),
+        }),
+      }
+    : {},
+);
 
 const shutdown = async (): Promise<void> => {
   await worker.stop();
