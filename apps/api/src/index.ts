@@ -1,13 +1,17 @@
+import { createRuntimeAgentRegistry } from '@ai-agents/agent-composition';
+import { loadJobRuntimeConfig } from '@ai-agents/config';
 import {
   createDatabaseConnection,
   type DatabaseConnection,
   PostgresAgentRunRepository,
   PostgresJobQueue,
 } from '@ai-agents/database';
-import { createRuntimeAgentRegistry } from '@ai-agents/echo-agent';
 import { createApp } from './app';
+import { resolveApiAccessToken } from './runtime-config';
 
 const port = Number(process.env.APP_PORT ?? 4000);
+const accessToken = resolveApiAccessToken();
+const jobRuntimeConfig = loadJobRuntimeConfig();
 let database: DatabaseConnection | undefined;
 
 try {
@@ -29,16 +33,17 @@ console.info(
   }),
 );
 
-const app = createApp(
-  database
+const app = createApp({
+  ...(accessToken ? { accessToken } : {}),
+  ...(database
     ? {
         database,
-        queue: new PostgresJobQueue(database),
-        registry: createRuntimeAgentRegistry(),
+        queue: new PostgresJobQueue(database, jobRuntimeConfig),
         runs: new PostgresAgentRunRepository(database),
       }
-    : {},
-);
+    : {}),
+  registry: createRuntimeAgentRegistry(),
+});
 const server = Bun.serve({
   fetch: app.fetch,
   port,
@@ -56,9 +61,6 @@ const shutdown = async (): Promise<void> => {
 
     try {
       await server.stop(true);
-      if (database) {
-        await database.close();
-      }
     } catch (error) {
       exitCode = 1;
       console.error(
@@ -67,9 +69,23 @@ const shutdown = async (): Promise<void> => {
           message: error instanceof Error ? error.message : 'unknown',
         }),
       );
-    } finally {
-      process.exit(exitCode);
     }
+
+    try {
+      if (database) {
+        await database.close();
+      }
+    } catch (error) {
+      exitCode = 1;
+      console.error(
+        JSON.stringify({
+          event: 'api.database.close.failed',
+          message: error instanceof Error ? error.message : 'unknown',
+        }),
+      );
+    }
+
+    process.exit(exitCode);
   })();
 
   return shutdownPromise;

@@ -4,4 +4,5 @@ export interface AgentContext {
   readonly agentId: string;
   readonly triggerType: string;
   readonly startedAt: Date;
+  readonly signal: AbortSignal;
 }

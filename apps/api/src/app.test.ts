@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createDevelopmentAgentRegistry } from '@ai-agents/agent-composition';
 import type {
   AgentJob,
   AgentRun,
@@ -6,10 +7,13 @@ import type {
   ClaimNextJobInput,
   CompleteJobInput,
   EnqueueJobInput,
+  ExtendJobLeaseInput,
   FailJobInput,
   JobQueue,
+  ReleaseJobInput,
 } from '@ai-agents/agent-core';
-import { createDevelopmentAgentRegistry } from '@ai-agents/echo-agent';
+import { AgentRegistry, defineAgent, IdempotencyConflictError } from '@ai-agents/agent-core';
+import { z } from 'zod';
 
 import { createApp } from './app';
 
@@ -22,12 +26,14 @@ function createJob(overrides: Partial<AgentJob> = {}): AgentJob {
     id: jobId,
     agentId: 'echo',
     input: { value: 'secret' },
+    triggerType: 'manual',
     status: 'queued',
     idempotencyKey: null,
     attempts: 0,
     availableAt: now,
     lockedAt: null,
     lockedBy: null,
+    lastErrorCode: null,
     lastError: null,
     createdAt: now,
     completedAt: null,
@@ -66,6 +72,12 @@ class FakeJobQueue implements JobQueue {
 
   async complete(_input: CompleteJobInput): Promise<void> {}
 
+  async extendLease(_input: ExtendJobLeaseInput): Promise<boolean> {
+    return true;
+  }
+
+  async release(_input: ReleaseJobInput): Promise<void> {}
+
   async fail(_input: FailJobInput): Promise<void> {}
 
   async recoverStaleJobs(): Promise<number> {
@@ -73,16 +85,27 @@ class FakeJobQueue implements JobQueue {
   }
 }
 
-class FakeRunRepository implements Pick<AgentRunRepository, 'getRun'> {
+class FakeRunRepository implements Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> {
   readonly runs = new Map<string, AgentRun>();
 
   async getRun(id: string): Promise<AgentRun | null> {
     return this.runs.get(id) ?? null;
   }
+
+  async getLatestRunForJob(jobId: string): Promise<AgentRun | null> {
+    return (
+      [...this.runs.values()]
+        .filter((run) => run.jobId === jobId)
+        .sort((left, right) => right.startedAt.getTime() - left.startedAt.getTime())[0] ?? null
+    );
+  }
 }
 
 function createConfiguredApp(
-  options: { queue?: JobQueue; runs?: Pick<AgentRunRepository, 'getRun'> } = {},
+  options: {
+    queue?: JobQueue;
+    runs?: Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'>;
+  } = {},
 ) {
   return createApp({
     logger: { error() {}, info() {} },
@@ -168,7 +191,7 @@ describe('API app', () => {
     expect(first.status).toBe(202);
     expect(await first.json()).toEqual({ jobId });
     expect(await second.json()).toEqual({ jobId });
-    expect(queue.enqueued).toEqual([{ ...request, agentId: 'echo' }]);
+    expect(queue.enqueued).toEqual([{ ...request, agentId: 'echo', triggerType: 'manual' }]);
   });
 
   test('rejects invalid input and unknown Agents', async () => {
@@ -195,6 +218,55 @@ describe('API app', () => {
         requestId: 'generated-request-id',
       },
     });
+  });
+
+  test('rejects whitespace-only idempotency keys', async () => {
+    const response = await createConfiguredApp().request('/agents/echo/runs', {
+      method: 'POST',
+      body: JSON.stringify({ input: { value: 'Hello' }, idempotencyKey: '   ' }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'BAD_REQUEST' } });
+  });
+
+  test('rejects manual runs for Agents that do not declare the manual trigger', async () => {
+    const registry = new AgentRegistry().register(
+      defineAgent({
+        manifest: {
+          id: 'scheduled-only',
+          name: 'Scheduled only',
+          version: '0.1.0',
+          triggers: ['schedule'],
+        },
+        inputSchema: z.object({ value: z.string() }),
+        outputSchema: z.object({ value: z.string() }),
+        async run(_context, input) {
+          return input;
+        },
+      }),
+    );
+    const queue = new FakeJobQueue();
+    const app = createApp({
+      logger: { error() {}, info() {} },
+      queue,
+      registry,
+      requestIdGenerator: () => 'generated-request-id',
+      runs: new FakeRunRepository(),
+    });
+
+    const response = await app.request('/agents/scheduled-only/runs', {
+      method: 'POST',
+      body: JSON.stringify({ input: { value: 'Hello' } }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: 'AGENT_TRIGGER_UNSUPPORTED' },
+    });
+    expect(queue.enqueued).toHaveLength(0);
   });
 
   test('returns Job and Run metadata without input or output data', async () => {
@@ -225,7 +297,9 @@ describe('API app', () => {
         availableAt: '2026-07-19T00:00:00.000Z',
         createdAt: '2026-07-19T00:00:00.000Z',
         completedAt: '2026-07-19T00:00:00.000Z',
+        errorCode: null,
         hasError: false,
+        latestRunId: runId,
       },
     });
     expect(await runResponse.json()).toEqual({
@@ -240,6 +314,42 @@ describe('API app', () => {
         completedAt: '2026-07-19T00:00:00.000Z',
       },
     });
+  });
+
+  test('exposes a Job error code without exposing its error message', async () => {
+    const queue = new FakeJobQueue();
+    queue.jobs.set(
+      jobId,
+      createJob({
+        status: 'failed',
+        lastErrorCode: 'AGENT_EXECUTION_FAILED',
+        lastError: 'sensitive adapter detail',
+      }),
+    );
+    const app = createConfiguredApp({ queue });
+
+    const response = await app.request(`/jobs/${jobId}`);
+    const body = await response.json();
+
+    expect(body).toMatchObject({
+      job: { errorCode: 'AGENT_EXECUTION_FAILED', hasError: true },
+    });
+    expect(JSON.stringify(body)).not.toContain('sensitive adapter detail');
+  });
+
+  test('reports migrated Job errors even when a legacy error code is unavailable', async () => {
+    const queue = new FakeJobQueue();
+    queue.jobs.set(
+      jobId,
+      createJob({ status: 'failed', lastErrorCode: null, lastError: 'legacy failure detail' }),
+    );
+    const app = createConfiguredApp({ queue });
+
+    const response = await app.request(`/jobs/${jobId}`);
+    const body = await response.json();
+
+    expect(body).toMatchObject({ job: { errorCode: null, hasError: true } });
+    expect(JSON.stringify(body)).not.toContain('legacy failure detail');
   });
 
   test('returns stable request IDs and common errors', async () => {
@@ -281,5 +391,52 @@ describe('API app', () => {
         requestId: 'generated-request-id',
       },
     });
+  });
+
+  test('requires a configured Bearer token except for health checks', async () => {
+    const app = createApp({
+      accessToken: 'test-token',
+      logger: { error() {}, info() {} },
+      queue: new FakeJobQueue(),
+      registry: createDevelopmentAgentRegistry(),
+      requestIdGenerator: () => 'generated-request-id',
+      runs: new FakeRunRepository(),
+    });
+
+    const denied = await app.request('/agents');
+    const allowed = await app.request('/agents', {
+      headers: { Authorization: 'Bearer test-token' },
+    });
+    const health = await app.request('/health/live');
+
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toEqual({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Authentication is required',
+        requestId: 'generated-request-id',
+      },
+    });
+    expect(allowed.status).toBe(200);
+    expect(health.status).toBe(200);
+  });
+
+  test('returns 409 when an idempotency key is reused for a different request', async () => {
+    const queue = new FakeJobQueue();
+    queue.enqueue = async () => {
+      throw new IdempotencyConflictError(
+        'idempotency key was already used with a different request',
+      );
+    };
+    const app = createConfiguredApp({ queue });
+
+    const response = await app.request('/agents/echo/runs', {
+      method: 'POST',
+      body: JSON.stringify({ input: { value: 'Hello' }, idempotencyKey: 'same-key' }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'IDEMPOTENCY_CONFLICT' } });
   });
 });

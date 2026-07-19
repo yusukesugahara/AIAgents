@@ -1,9 +1,11 @@
+import { timingSafeEqual } from 'node:crypto';
 import {
   AgentCoreError,
   type AgentJob,
   type AgentRegistry,
   type AgentRun,
   type AgentRunRepository,
+  IdempotencyConflictError,
   type JobQueue,
 } from '@ai-agents/agent-core';
 import type { DatabaseConnection } from '@ai-agents/database';
@@ -22,18 +24,20 @@ export interface ApiLogger {
 }
 
 export interface ApiAppOptions {
-  database?: Pick<DatabaseConnection, 'isReady'>;
+  accessToken?: string;
+  database?: Pick<DatabaseConnection, 'isReady'> &
+    Partial<Pick<DatabaseConnection, 'isSchemaReady'>>;
   logger?: ApiLogger;
   queue?: JobQueue;
   registry?: AgentRegistry;
   requestIdGenerator?: () => string;
-  runs?: Pick<AgentRunRepository, 'getRun'>;
+  runs?: Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'>;
 }
 
 class ApiError extends Error {
   constructor(
     readonly code: string,
-    readonly status: 400 | 404 | 500,
+    readonly status: 400 | 401 | 404 | 409 | 500,
     message: string,
   ) {
     super(message);
@@ -44,7 +48,7 @@ class ApiError extends Error {
 const runRequestSchema = z
   .object({
     input: z.unknown(),
-    idempotencyKey: z.string().min(1).max(255).optional(),
+    idempotencyKey: z.string().trim().min(1).max(255).optional(),
   })
   .strict()
   .refine((value) => Object.hasOwn(value, 'input'), { message: 'input is required' });
@@ -62,6 +66,14 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
     context.header('X-Request-Id', requestId);
 
     try {
+      if (
+        options.accessToken &&
+        !new URL(context.req.url).pathname.startsWith('/health/') &&
+        !hasValidBearerToken(context.req.header('Authorization'), options.accessToken)
+      ) {
+        return errorResponse(context, 'UNAUTHORIZED', 401, 'Authentication is required');
+      }
+
       await next();
     } finally {
       logger.info({
@@ -77,7 +89,11 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
   app.get('/health/live', (context) => context.json({ status: 'ok' }));
 
   app.get('/health/ready', async (context) => {
-    const ready = options.database ? await options.database.isReady() : false;
+    const ready = options.database
+      ? options.database.isSchemaReady
+        ? await options.database.isSchemaReady()
+        : await options.database.isReady()
+      : false;
 
     if (!ready) {
       return context.json({ status: 'not_ready' }, 503);
@@ -101,6 +117,15 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
     const registry = requireRegistry(options);
     const queue = requireQueue(options);
     const agent = getAgent(registry, context.req.param('agentId'));
+
+    if (!agent.manifest.triggers.includes('manual')) {
+      throw new ApiError(
+        'AGENT_TRIGGER_UNSUPPORTED',
+        400,
+        `Agent "${agent.manifest.id}" does not support manual runs`,
+      );
+    }
+
     const payload = await parseRunRequest(context);
     const inputResult = agent.inputSchema.safeParse(payload.input);
 
@@ -111,6 +136,7 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
     const enqueueInput = {
       agentId: agent.manifest.id,
       input: inputResult.data,
+      triggerType: 'manual',
       ...(payload.idempotencyKey ? { idempotencyKey: payload.idempotencyKey } : {}),
     };
     const job = await queue.enqueue(enqueueInput);
@@ -132,7 +158,8 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
       throw new ApiError('JOB_NOT_FOUND', 404, `Job "${jobId}" was not found`);
     }
 
-    return context.json({ job: toJobResponse(job) });
+    const latestRun = await requireRunRepository(options).getLatestRunForJob(jobId);
+    return context.json({ job: toJobResponse(job, latestRun) });
   });
 
   app.get('/runs/:runId', async (context) => {
@@ -155,6 +182,10 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
 
     if (error instanceof AgentCoreError && error.code === 'AGENT_NOT_FOUND') {
       return errorResponse(context, 'AGENT_NOT_FOUND', 404, error.message);
+    }
+
+    if (error instanceof IdempotencyConflictError) {
+      return errorResponse(context, 'IDEMPOTENCY_CONFLICT', 409, error.message);
     }
 
     logger.error({
@@ -184,7 +215,9 @@ function requireQueue(options: ApiAppOptions): JobQueue {
   return options.queue;
 }
 
-function requireRunRepository(options: ApiAppOptions): Pick<AgentRunRepository, 'getRun'> {
+function requireRunRepository(
+  options: ApiAppOptions,
+): Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> {
   if (!options.runs) {
     throw new ApiError('INTERNAL_ERROR', 500, 'Run Repository is not configured');
   }
@@ -231,15 +264,17 @@ function parseId(value: string): string {
   return parsed.data;
 }
 
-function toJobResponse(job: AgentJob) {
+function toJobResponse(job: AgentJob, latestRun: AgentRun | null) {
   return {
     agentId: job.agentId,
     attempts: job.attempts,
     availableAt: toIsoString(job.availableAt),
     completedAt: job.completedAt ? toIsoString(job.completedAt) : null,
     createdAt: toIsoString(job.createdAt),
-    hasError: job.lastError !== null,
+    errorCode: job.lastErrorCode,
+    hasError: job.lastErrorCode !== null || job.lastError !== null,
     id: job.id,
+    latestRunId: latestRun?.id ?? null,
     status: job.status,
   };
 }
@@ -264,12 +299,21 @@ function toIsoString(value: Date | string): string {
 function errorResponse(
   context: Context<ApiEnvironment>,
   code: string,
-  status: 400 | 404 | 500,
+  status: 400 | 401 | 404 | 409 | 500,
   message: string,
 ) {
   const requestId = context.get('requestId');
   context.header('X-Request-Id', requestId);
   return context.json({ error: { code, message, requestId } }, status);
+}
+
+function hasValidBearerToken(authorization: string | undefined, expectedToken: string): boolean {
+  const token = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
+  const encoder = new TextEncoder();
+  const actual = encoder.encode(token);
+  const expected = encoder.encode(expectedToken);
+
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 const consoleLogger: ApiLogger = {

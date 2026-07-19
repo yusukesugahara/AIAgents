@@ -36,9 +36,10 @@
       "name": "@ai-agents/api",
       "version": "0.1.0",
       "dependencies": {
+        "@ai-agents/agent-composition": "workspace:*",
         "@ai-agents/agent-core": "workspace:*",
+        "@ai-agents/config": "workspace:*",
         "@ai-agents/database": "workspace:*",
-        "@ai-agents/echo-agent": "workspace:*",
         "hono": "^4.11.10",
         "zod": "^4.3.6",
       },
@@ -47,8 +48,17 @@
       "name": "@ai-agents/worker",
       "version": "0.1.0",
       "dependencies": {
+        "@ai-agents/agent-composition": "workspace:*",
         "@ai-agents/agent-core": "workspace:*",
+        "@ai-agents/config": "workspace:*",
         "@ai-agents/database": "workspace:*",
+      },
+    },
+    "packages/agent-composition": {
+      "name": "@ai-agents/agent-composition",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/echo-agent": "workspace:*",
       },
     },
@@ -85,6 +95,8 @@
     },
   },
   "packages": {
+    "@ai-agents/agent-composition": ["@ai-agents/agent-composition@workspace:packages/agent-composition"],
+
     "@ai-agents/agent-core": ["@ai-agents/agent-core@workspace:packages/agent-core"],
 
     "@ai-agents/agent-template": ["@ai-agents/agent-template@workspace:agents/_template"],

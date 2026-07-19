@@ -8,6 +8,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -72,32 +73,45 @@ export const agentJobs = pgTable(
     id: uuid('id').primaryKey().default(sql`uuidv7()`),
     agentId: text('agent_id').notNull(),
     inputJson: jsonb('input_json').notNull(),
+    triggerType: text('trigger_type').notNull().default('manual'),
     status: jobStatus('status').notNull().default('queued'),
-    idempotencyKey: text('idempotency_key').unique(),
+    idempotencyKey: text('idempotency_key'),
     attempts: integer('attempts').notNull().default(0),
     availableAt: timestamp('available_at', { withTimezone: true }).notNull().defaultNow(),
+    requestedAvailableAt: timestamp('requested_available_at', { withTimezone: true }),
     lockedAt: timestamp('locked_at', { withTimezone: true }),
     lockedBy: text('locked_by'),
+    lastErrorCode: text('last_error_code'),
     lastError: text('last_error'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
   },
-  (table) => [index('agent_jobs_status_available_at_idx').on(table.status, table.availableAt)],
+  (table) => [
+    index('agent_jobs_status_available_at_idx').on(table.status, table.availableAt),
+    uniqueIndex('agent_jobs_agent_id_idempotency_key_unique').on(
+      table.agentId,
+      table.idempotencyKey,
+    ),
+  ],
 );
 
-export const agentRuns = pgTable('agent_runs', {
-  id: uuid('id').primaryKey().default(sql`uuidv7()`),
-  agentId: text('agent_id').notNull(),
-  jobId: uuid('job_id')
-    .notNull()
-    .references(() => agentJobs.id, { onDelete: 'cascade' }),
-  status: runStatus('status').notNull().default('running'),
-  triggerType: text('trigger_type').notNull(),
-  inputJson: jsonb('input_json').notNull(),
-  outputJson: jsonb('output_json'),
-  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
-  completedAt: timestamp('completed_at', { withTimezone: true }),
-});
+export const agentRuns = pgTable(
+  'agent_runs',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    agentId: text('agent_id').notNull(),
+    jobId: uuid('job_id')
+      .notNull()
+      .references(() => agentJobs.id, { onDelete: 'cascade' }),
+    status: runStatus('status').notNull().default('running'),
+    triggerType: text('trigger_type').notNull(),
+    inputJson: jsonb('input_json').notNull(),
+    outputJson: jsonb('output_json'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [index('agent_runs_job_id_started_at_idx').on(table.jobId, table.startedAt)],
+);
 
 export const agentRunSteps = pgTable('agent_run_steps', {
   id: uuid('id').primaryKey().default(sql`uuidv7()`),
@@ -114,15 +128,19 @@ export const agentRunSteps = pgTable('agent_run_steps', {
   completedAt: timestamp('completed_at', { withTimezone: true }),
 });
 
-export const agentErrors = pgTable('agent_errors', {
-  id: uuid('id').primaryKey().default(sql`uuidv7()`),
-  runId: uuid('run_id').references(() => agentRuns.id, { onDelete: 'set null' }),
-  jobId: uuid('job_id').references(() => agentJobs.id, { onDelete: 'set null' }),
-  code: text('code').notNull(),
-  message: text('message').notNull(),
-  meta: jsonb('meta').notNull().default(sql`'{}'::jsonb`),
-  occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const agentErrors = pgTable(
+  'agent_errors',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    runId: uuid('run_id').references(() => agentRuns.id, { onDelete: 'set null' }),
+    jobId: uuid('job_id').references(() => agentJobs.id, { onDelete: 'set null' }),
+    code: text('code').notNull(),
+    message: text('message').notNull(),
+    meta: jsonb('meta').notNull().default(sql`'{}'::jsonb`),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('agent_errors_run_id_occurred_at_idx').on(table.runId, table.occurredAt)],
+);
 
 export const reviewRequests = pgTable('review_requests', {
   id: uuid('id').primaryKey().default(sql`uuidv7()`),

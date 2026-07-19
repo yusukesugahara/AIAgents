@@ -1,4 +1,15 @@
 services:
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: bun run --filter @ai-agents/database db:migrate
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build:
       context: .
@@ -12,9 +23,10 @@ services:
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
       - APP_PORT=4000
+      - APP_ENV=${APP_ENV:-development}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   worker:
     build:
@@ -26,9 +38,10 @@ services:
         required: false
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
+      - APP_ENV=${APP_ENV:-development}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   postgres:
     image: postgres:18.4

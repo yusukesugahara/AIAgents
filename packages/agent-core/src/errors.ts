@@ -3,8 +3,8 @@ export type AgentCoreErrorCode =
   | 'AGENT_NOT_FOUND'
   | 'AGENT_INPUT_INVALID'
   | 'AGENT_OUTPUT_INVALID'
-  | 'AGENT_EXECUTION_FAILED'
-  | 'AGENT_RUN_PERSISTENCE_FAILED';
+  | 'AGENT_TRIGGER_UNSUPPORTED'
+  | 'AGENT_EXECUTION_FAILED';
 
 export class AgentCoreError extends Error {
   constructor(
@@ -23,6 +23,20 @@ export class RetryableJobError extends Error {
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, options);
     this.name = 'RetryableJobError';
+  }
+}
+
+export class AgentRunPersistenceError extends RetryableJobError {
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
+    this.name = 'AgentRunPersistenceError';
+  }
+}
+
+export class IdempotencyConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IdempotencyConflictError';
   }
 }
 

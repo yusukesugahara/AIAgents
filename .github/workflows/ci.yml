@@ -9,6 +9,20 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.4
+        env:
+          POSTGRES_DB: ai_agents
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ai_agents"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -18,3 +32,8 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
+      - run: bun run db:migrate
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/ai_agents
+      - run: bun run test:integration:database
+      - run: bun run test:integration:docker

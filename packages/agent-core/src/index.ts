@@ -13,13 +13,22 @@ export type { AgentRunnerOptions, AgentRunRequest, AgentRunResult } from './agen
 export { AgentRunner } from './agent-runner';
 export { defineAgent } from './define-agent';
 export type { AgentCoreErrorCode } from './errors';
-export { AgentCoreError, isRetryableJobError, RetryableJobError } from './errors';
+export {
+  AgentCoreError,
+  AgentRunPersistenceError,
+  IdempotencyConflictError,
+  isRetryableJobError,
+  RetryableJobError,
+} from './errors';
 export type {
   AgentJob,
   AgentJobStatus,
   ClaimNextJobInput,
   CompleteJobInput,
   EnqueueJobInput,
+  ExtendJobLeaseInput,
   FailJobInput,
   JobQueue,
+  ReleaseJobInput,
 } from './job-queue';
+export { createUuidV7 } from './uuidv7';

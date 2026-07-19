@@ -1,8 +1,4 @@
-import {
-  AgentRegistry,
-  type AgentRegistry as AgentRegistryType,
-  defineAgent,
-} from '@ai-agents/agent-core';
+import { type AgentRegistry as AgentRegistryType, defineAgent } from '@ai-agents/agent-core';
 import { z } from 'zod';
 
 const echoInputSchema = z.object({
@@ -30,14 +26,4 @@ export const echoAgent = defineAgent({
 export function registerDevelopmentAgents(registry: AgentRegistryType): AgentRegistryType {
   registry.register(echoAgent);
   return registry;
-}
-
-export function createDevelopmentAgentRegistry(): AgentRegistry {
-  return registerDevelopmentAgents(new AgentRegistry());
-}
-
-export function createRuntimeAgentRegistry(environment = process.env.APP_ENV): AgentRegistry {
-  const registry = new AgentRegistry();
-
-  return environment === 'production' ? registry : registerDevelopmentAgents(registry);
 }

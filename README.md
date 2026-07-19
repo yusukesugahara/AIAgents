@@ -18,7 +18,7 @@ bun test
 開発用 API は次で起動します。
 
 ```bash
-bun --filter @ai-agents/api start
+APP_ENV=development bun --filter @ai-agents/api start
 ```
 
 PostgreSQL ベースの基盤実装では、次のヘルスチェックを利用できます。
@@ -32,14 +32,14 @@ Docker での起動確認は次です。
 
 ```bash
 cp .env.example .env
-docker compose up --build -d postgres
-bun run db:migrate
 docker compose up --build
 ```
 
 `.env`を作成しない場合でもDocker Composeは起動でき、コンテナ内のDB接続情報には
-`compose.yaml`の開発用デフォルト値が使われます。ホストからMigrationを実行する場合は、
-上記のように`.env.example`をコピーしてください。
+`compose.yaml`の開発用デフォルト値が使われます。Migrationは`migrate`サービスがAPI／Workerの
+起動前に自動適用します。
+
+Job は初回を含めて既定で最大 3 回実行され、再試行時は 1 秒、2 秒待機します。
 
 DB Integration TestとDocker Compose全体のIntegration Testは、それぞれ次で実行します。
 

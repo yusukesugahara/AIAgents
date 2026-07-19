@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { IdempotencyConflictError, RetryableJobError } from '@ai-agents/agent-core';
 
 import { createDatabaseConnection, PostgresAgentRunRepository, PostgresJobQueue } from './index';
 
@@ -66,28 +67,58 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
 
     test('queues, retries, and recovers Jobs without duplicate claims', async () => {
       const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const concurrentConnection = createDatabaseConnection({
+        databaseUrl: integrationDatabaseUrl,
+      });
       const queue = new PostgresJobQueue(connection, {
-        lockTimeoutMs: 1,
+        lockTimeoutMs: 1_000,
         retryDelaysMs: [1, 2, 4],
       });
+      const concurrentQueue = new PostgresJobQueue(concurrentConnection, {
+        lockTimeoutMs: 1_000,
+        retryDelaysMs: [1, 2, 4],
+      });
+      const agentId = `test-agent-${crypto.randomUUID()}`;
       const idempotencyKey = `queue-${crypto.randomUUID()}`;
 
       try {
         const first = await queue.enqueue({
-          agentId: 'test-agent',
+          agentId,
           input: { source: 'integration' },
+          triggerType: 'manual',
           idempotencyKey,
         });
         const duplicate = await queue.enqueue({
-          agentId: 'test-agent',
-          input: { source: 'ignored' },
+          agentId,
+          input: { source: 'integration' },
+          triggerType: 'manual',
           idempotencyKey,
         });
         expect(duplicate.id).toBe(first.id);
+        expect(first.triggerType).toBe('manual');
+
+        await expect(
+          queue.enqueue({
+            agentId,
+            input: { source: 'different' },
+            triggerType: 'manual',
+            idempotencyKey,
+          }),
+        ).rejects.toBeInstanceOf(IdempotencyConflictError);
+
+        await expect(
+          queue.enqueue({
+            agentId,
+            input: { source: 'integration' },
+            triggerType: 'manual',
+            idempotencyKey,
+            availableAt: new Date(Date.now() + 60_000),
+          }),
+        ).rejects.toBeInstanceOf(IdempotencyConflictError);
 
         const [claimedByOne, claimedByTwo] = await Promise.all([
-          queue.claimNext({ workerId: 'worker-one' }),
-          queue.claimNext({ workerId: 'worker-two' }),
+          queue.claimNext({ agentId, workerId: 'worker-one' }),
+          concurrentQueue.claimNext({ agentId, workerId: 'worker-two' }),
         ]);
         const claimedJobs = [claimedByOne, claimedByTwo].filter((job) => job !== null);
         expect(claimedJobs).toHaveLength(1);
@@ -105,12 +136,17 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         });
         await Bun.sleep(5);
 
-        const retried = await queue.claimNext({ workerId: 'worker-three' });
+        const retried = await queue.claimNext({ agentId, workerId: 'worker-three' });
         expect(retried?.attempts).toBe(2);
         expect(retried?.status).toBe('processing');
         if (!retried) {
           throw new Error('Expected a retried Job');
         }
+
+        expect(await queue.extendLease({ jobId: retried.id, workerId: 'worker-three' })).toBe(true);
+        expect(await queue.extendLease({ jobId: retried.id, workerId: 'worker-other' })).toBe(
+          false,
+        );
 
         await connection.client`
           UPDATE agent_jobs
@@ -119,7 +155,7 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         `;
         expect(await queue.recoverStaleJobs()).toBe(1);
 
-        const recovered = await queue.claimNext({ workerId: 'worker-four' });
+        const recovered = await queue.claimNext({ agentId, workerId: 'worker-four' });
         expect(recovered?.attempts).toBe(3);
         if (!recovered) {
           throw new Error('Expected a recovered Job');
@@ -133,16 +169,199 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         });
 
         const [terminal] = (await connection.client`
-          SELECT status, attempts, completed_at
+          SELECT status, attempts, completed_at, last_error_code
           FROM agent_jobs
           WHERE id = ${first.id}::uuid
-        `) as [{ status: string; attempts: number; completed_at: Date | null }];
+        `) as [
+          { status: string; attempts: number; completed_at: Date | null; last_error_code: string },
+        ];
         expect(terminal).toEqual({
           status: 'failed',
           attempts: 3,
           completed_at: expect.any(String),
+          last_error_code: 'JOB_EXECUTION_FAILED',
         });
       } finally {
+        await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.close();
+        await concurrentConnection.close();
+      }
+    });
+
+    test('honors delayed availability', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection);
+      const agentId = `delayed-agent-${crypto.randomUUID()}`;
+      const idempotencyKey = `delayed-${crypto.randomUUID()}`;
+
+      try {
+        const job = await queue.enqueue({
+          agentId,
+          input: { source: 'integration' },
+          triggerType: 'manual',
+          idempotencyKey,
+          availableAt: new Date(Date.now() + 60_000),
+        });
+
+        expect(await queue.claimNext({ agentId, workerId: 'worker-one' })).toBeNull();
+        await connection.client`
+          UPDATE agent_jobs SET available_at = NOW() WHERE id = ${job.id}::uuid
+        `;
+        expect(await queue.claimNext({ agentId, workerId: 'worker-one' })).toMatchObject({
+          id: job.id,
+          status: 'processing',
+        });
+        await queue.complete({ jobId: job.id, workerId: 'worker-one' });
+      } finally {
+        await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.close();
+      }
+    });
+
+    test('releases a claimed Job without consuming an execution attempt', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection);
+      const agentId = `released-agent-${crypto.randomUUID()}`;
+      const idempotencyKey = `released-${crypto.randomUUID()}`;
+
+      try {
+        const job = await queue.enqueue({
+          agentId,
+          input: { source: 'integration' },
+          triggerType: 'manual',
+          idempotencyKey,
+        });
+        const claimed = await queue.claimNext({ agentId, workerId: 'worker-one' });
+        expect(claimed?.attempts).toBe(1);
+
+        await queue.release({ jobId: job.id, workerId: 'worker-one' });
+        expect(await queue.get(job.id)).toMatchObject({
+          attempts: 0,
+          lockedAt: null,
+          lockedBy: null,
+          status: 'queued',
+        });
+
+        const reclaimed = await queue.claimNext({ agentId, workerId: 'worker-two' });
+        expect(reclaimed?.attempts).toBe(1);
+        await queue.complete({ jobId: job.id, workerId: 'worker-two' });
+      } finally {
+        await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.close();
+      }
+    });
+
+    test('uses 1s and 2s retry waits and fails after the third attempt', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection);
+      const agentId = `backoff-agent-${crypto.randomUUID()}`;
+      const idempotencyKey = `backoff-${crypto.randomUUID()}`;
+
+      try {
+        const job = await queue.enqueue({
+          agentId,
+          input: { source: 'integration' },
+          triggerType: 'manual',
+          idempotencyKey,
+        });
+
+        const first = await queue.claimNext({ agentId, workerId: 'worker-one' });
+        expect(first?.attempts).toBe(1);
+        const firstFailureAt = Date.now();
+        await queue.fail({
+          jobId: job.id,
+          workerId: 'worker-one',
+          error: new RetryableJobError('temporary failure'),
+          retryable: true,
+        });
+        const firstRetry = await queue.get(job.id);
+        expect(firstRetry?.status).toBe('retry_waiting');
+        expect(firstRetry?.availableAt.getTime() ?? 0).toBeGreaterThanOrEqual(firstFailureAt + 900);
+        expect(firstRetry?.availableAt.getTime() ?? 0).toBeLessThan(firstFailureAt + 1_500);
+
+        await connection.client`
+          UPDATE agent_jobs SET available_at = NOW() WHERE id = ${job.id}::uuid
+        `;
+        const second = await queue.claimNext({ agentId, workerId: 'worker-two' });
+        expect(second?.attempts).toBe(2);
+        const secondFailureAt = Date.now();
+        await queue.fail({
+          jobId: job.id,
+          workerId: 'worker-two',
+          error: new RetryableJobError('temporary failure'),
+          retryable: true,
+        });
+        const secondRetry = await queue.get(job.id);
+        expect(secondRetry?.status).toBe('retry_waiting');
+        expect(secondRetry?.availableAt.getTime() ?? 0).toBeGreaterThanOrEqual(
+          secondFailureAt + 1_900,
+        );
+        expect(secondRetry?.availableAt.getTime() ?? 0).toBeLessThan(secondFailureAt + 2_500);
+
+        await connection.client`
+          UPDATE agent_jobs SET available_at = NOW() WHERE id = ${job.id}::uuid
+        `;
+        const third = await queue.claimNext({ agentId, workerId: 'worker-three' });
+        expect(third?.attempts).toBe(3);
+        await queue.fail({
+          jobId: job.id,
+          workerId: 'worker-three',
+          error: new RetryableJobError('temporary failure'),
+          retryable: true,
+        });
+        expect(await queue.get(job.id)).toMatchObject({
+          attempts: 3,
+          lastErrorCode: 'JOB_RETRYABLE',
+          status: 'failed',
+        });
+      } finally {
+        await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.close();
+      }
+    });
+
+    test('recovers an unleased processing Job and fails its running Run', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection, { lockTimeoutMs: 1_000 });
+      const repository = new PostgresAgentRunRepository(connection);
+      const idempotencyKey = `stale-run-${crypto.randomUUID()}`;
+      const runId = crypto.randomUUID();
+
+      try {
+        const job = await queue.enqueue({
+          agentId: 'test-agent',
+          input: { source: 'stale-run-integration' },
+          triggerType: 'manual',
+          idempotencyKey,
+        });
+        const claimed = await queue.claimNext({ agentId: 'test-agent', workerId: 'worker-one' });
+        expect(claimed?.id).toBe(job.id);
+        await repository.startRun({
+          runId,
+          jobId: job.id,
+          agentId: 'test-agent',
+          triggerType: 'manual',
+          input: { source: 'stale-run-integration' },
+          startedAt: new Date(),
+        });
+        await connection.client`
+          UPDATE agent_jobs
+          SET locked_at = NULL
+          WHERE id = ${job.id}::uuid
+        `;
+
+        await queue.recoverStaleJobs();
+
+        expect(await queue.get(job.id)).toMatchObject({
+          status: 'retry_waiting',
+          lastErrorCode: 'JOB_LOCK_EXPIRED',
+        });
+        expect(await repository.getRun(runId)).toMatchObject({
+          status: 'failed',
+          errorCode: 'JOB_LOCK_EXPIRED',
+        });
+      } finally {
+        await connection.client`DELETE FROM agent_errors WHERE run_id = ${runId}::uuid`;
         await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
         await connection.close();
       }
@@ -155,12 +374,14 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
       const idempotencyKey = `run-${crypto.randomUUID()}`;
       const completedRunId = crypto.randomUUID();
       const failedRunId = crypto.randomUUID();
+      const abandonedRunId = crypto.randomUUID();
       const now = new Date();
 
       try {
         const job = await queue.enqueue({
           agentId: 'test-agent',
           input: { source: 'integration' },
+          triggerType: 'manual',
           idempotencyKey,
         });
 
@@ -222,10 +443,47 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           message: 'provider unavailable',
           job_id: job.id,
         });
+
+        await expect(
+          repository.completeRun({
+            runId: failedRunId,
+            output: { result: 'unexpected' },
+            completedAt: now,
+          }),
+        ).rejects.toThrow(`Agent Run "${failedRunId}" is not running and cannot be completed`);
+        await expect(
+          repository.failRun({
+            runId: completedRunId,
+            errorCode: 'AGENT_EXECUTION_FAILED',
+            errorMessage: 'unexpected',
+            completedAt: now,
+          }),
+        ).rejects.toThrow(`Agent Run "${completedRunId}" is not running and cannot be failed`);
+
+        const claimed = await queue.claimNext({ agentId: 'test-agent', workerId: 'worker-one' });
+        expect(claimed?.id).toBe(job.id);
+        await repository.startRun({
+          runId: abandonedRunId,
+          jobId: job.id,
+          agentId: 'test-agent',
+          triggerType: 'queue',
+          input: { source: 'integration' },
+          startedAt: now,
+        });
+        await queue.fail({
+          jobId: job.id,
+          workerId: 'worker-one',
+          error: new Error('Run persistence failed'),
+          retryable: true,
+        });
+        expect(await repository.getRun(abandonedRunId)).toMatchObject({
+          status: 'failed',
+          errorCode: 'RUN_PERSISTENCE_FAILED',
+        });
       } finally {
         await connection.client`
           DELETE FROM agent_errors
-          WHERE run_id IN (${completedRunId}::uuid, ${failedRunId}::uuid)
+          WHERE run_id IN (${completedRunId}::uuid, ${failedRunId}::uuid, ${abandonedRunId}::uuid)
         `;
         await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
         await connection.close();

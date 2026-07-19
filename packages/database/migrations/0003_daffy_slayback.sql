@@ -1,0 +1,2 @@
+CREATE INDEX "agent_errors_run_id_occurred_at_idx" ON "agent_errors" USING btree ("run_id","occurred_at");--> statement-breakpoint
+CREATE INDEX "agent_runs_job_id_started_at_idx" ON "agent_runs" USING btree ("job_id","started_at");

@@ -8,8 +8,9 @@
   },
   "dependencies": {
     "@ai-agents/agent-core": "workspace:*",
+    "@ai-agents/agent-composition": "workspace:*",
+    "@ai-agents/config": "workspace:*",
     "@ai-agents/database": "workspace:*",
-    "@ai-agents/echo-agent": "workspace:*",
     "hono": "^4.11.10",
     "zod": "^4.3.6"
   }

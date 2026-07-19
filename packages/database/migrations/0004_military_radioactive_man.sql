@@ -1,0 +1,1 @@
+ALTER TABLE "agent_jobs" ADD COLUMN "requested_available_at" timestamp with time zone;

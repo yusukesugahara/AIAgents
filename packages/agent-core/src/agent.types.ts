@@ -53,5 +53,6 @@ export interface AgentRunRepository {
   startRun(run: AgentRunStart): Promise<void>;
   completeRun(run: AgentRunCompletion): Promise<void>;
   failRun(run: AgentRunFailure): Promise<void>;
+  getLatestRunForJob(jobId: string): Promise<AgentRun | null>;
   getRun(runId: string): Promise<AgentRun | null>;
 }

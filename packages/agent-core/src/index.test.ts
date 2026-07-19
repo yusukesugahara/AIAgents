@@ -9,7 +9,9 @@ import {
   AgentRunner,
   type AgentRunRepository,
   type AgentRunStart,
+  createUuidV7,
   defineAgent,
+  RetryableJobError,
 } from './index';
 
 const inputSchema = z.object({ greeting: z.string() });
@@ -48,6 +50,10 @@ class FakeAgentRunRepository implements AgentRunRepository {
 
   async failRun(run: AgentRunFailure): Promise<void> {
     this.failed.push(run);
+  }
+
+  async getLatestRunForJob(): Promise<null> {
+    return null;
   }
 
   async getRun(): Promise<null> {
@@ -90,6 +96,20 @@ describe('AgentRegistry', () => {
 });
 
 describe('AgentRunner', () => {
+  test('rejects unsupported triggers before it creates a Run', async () => {
+    const { repository, runner } = createRunner();
+
+    await expect(
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'schedule',
+        input: { greeting: 'Hello' },
+      }),
+    ).rejects.toMatchObject({ code: 'AGENT_TRIGGER_UNSUPPORTED' });
+    expect(repository.started).toHaveLength(0);
+  });
+
   test('rejects invalid input before it creates a Run', async () => {
     const { repository, runner } = createRunner();
 
@@ -181,5 +201,73 @@ describe('AgentRunner', () => {
         completedAt: new Date('2026-07-19T00:00:00.000Z'),
       },
     ]);
+  });
+
+  test('saves a failed Run before retrying a retryable Agent error', async () => {
+    const { repository, runner } = createRunner(
+      createAgent(async () => {
+        throw new RetryableJobError('temporary provider failure');
+      }),
+    );
+
+    await expect(
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'manual',
+        input: { greeting: 'Hello' },
+      }),
+    ).rejects.toBeInstanceOf(RetryableJobError);
+    expect(repository.failed).toEqual([
+      {
+        runId: 'run-123',
+        errorCode: 'JOB_RETRYABLE',
+        errorMessage: 'temporary provider failure',
+        completedAt: new Date('2026-07-19T00:00:00.000Z'),
+      },
+    ]);
+  });
+
+  test('treats Run completion persistence failures as retryable without overwriting the Run', async () => {
+    const { repository, runner } = createRunner();
+    repository.completeRun = async () => {
+      throw new Error('database unavailable');
+    };
+
+    await expect(
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'manual',
+        input: { greeting: 'Hello' },
+      }),
+    ).rejects.toBeInstanceOf(RetryableJobError);
+    expect(repository.failed).toHaveLength(0);
+  });
+
+  test('treats Run failure persistence failures as retryable', async () => {
+    const { repository, runner } = createRunner(
+      createAgent(async () => {
+        throw new RetryableJobError('temporary provider failure');
+      }),
+    );
+    repository.failRun = async () => {
+      throw new Error('database unavailable');
+    };
+
+    await expect(
+      runner.run({
+        agentId: 'test-agent',
+        jobId: 'job-123',
+        triggerType: 'manual',
+        input: { greeting: 'Hello' },
+      }),
+    ).rejects.toBeInstanceOf(RetryableJobError);
+  });
+
+  test('uses UUIDv7 identifiers by default', () => {
+    const runId = createUuidV7(new Date('2026-07-19T00:00:00.000Z').getTime());
+
+    expect(runId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 });

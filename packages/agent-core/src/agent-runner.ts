@@ -1,12 +1,14 @@
 import type { AgentRunRepository } from './agent.types';
 import type { AgentContext } from './agent-context';
 import type { AgentRegistry } from './agent-registry';
-import { AgentCoreError, RetryableJobError } from './errors';
+import { AgentCoreError, AgentRunPersistenceError, RetryableJobError } from './errors';
+import { createUuidV7 } from './uuidv7';
 
 export interface AgentRunRequest {
   readonly agentId: string;
   readonly jobId: string;
   readonly input: unknown;
+  readonly signal?: AbortSignal;
   readonly triggerType: string;
 }
 
@@ -28,11 +30,19 @@ export class AgentRunner {
 
   constructor(private readonly options: AgentRunnerOptions) {
     this.#now = options.now ?? (() => new Date());
-    this.#runIdGenerator = options.runIdGenerator ?? (() => crypto.randomUUID());
+    this.#runIdGenerator = options.runIdGenerator ?? createUuidV7;
   }
 
   async run(request: AgentRunRequest): Promise<AgentRunResult> {
     const agent = this.options.registry.get(request.agentId);
+
+    if (!agent.manifest.triggers.includes(request.triggerType)) {
+      throw new AgentCoreError(
+        'AGENT_TRIGGER_UNSUPPORTED',
+        `Agent "${request.agentId}" does not support trigger "${request.triggerType}"`,
+      );
+    }
+
     const inputResult = agent.inputSchema.safeParse(request.input);
 
     if (!inputResult.success) {
@@ -50,6 +60,7 @@ export class AgentRunner {
       agentId: request.agentId,
       triggerType: request.triggerType,
       startedAt,
+      signal: request.signal ?? new AbortController().signal,
     };
 
     await this.#persistStart({
@@ -75,6 +86,10 @@ export class AgentRunner {
       await this.#persistCompletion({ runId, output: outputResult.data, completedAt: this.#now() });
       return { runId, output: outputResult.data };
     } catch (error) {
+      if (error instanceof AgentRunPersistenceError) {
+        throw error;
+      }
+
       const agentError = this.#toExecutionError(request.agentId, runId, error);
 
       await this.#persistFailure({
@@ -92,7 +107,7 @@ export class AgentRunner {
     try {
       await this.options.repository.startRun(input);
     } catch (error) {
-      throw new AgentCoreError('AGENT_RUN_PERSISTENCE_FAILED', 'Failed to save Agent Run start', {
+      throw new AgentRunPersistenceError('Failed to save Agent Run start', {
         cause: error,
       });
     }
@@ -102,13 +117,7 @@ export class AgentRunner {
     try {
       await this.options.repository.completeRun(input);
     } catch (error) {
-      throw new AgentCoreError(
-        'AGENT_RUN_PERSISTENCE_FAILED',
-        'Failed to save Agent Run completion',
-        {
-          cause: error,
-        },
-      );
+      throw new AgentRunPersistenceError('Failed to save Agent Run completion', { cause: error });
     }
   }
 
@@ -116,7 +125,7 @@ export class AgentRunner {
     try {
       await this.options.repository.failRun(input);
     } catch (error) {
-      throw new AgentCoreError('AGENT_RUN_PERSISTENCE_FAILED', 'Failed to save Agent Run failure', {
+      throw new AgentRunPersistenceError('Failed to save Agent Run failure', {
         cause: error,
       });
     }

@@ -74,9 +74,10 @@ function postgres(query: string): string {
   ]).stdout;
 }
 
-describe.skipIf(!dockerIntegrationEnabled)('Docker Compose PostgreSQL foundation', () => {
+describe.skipIf(!dockerIntegrationEnabled)('Docker Compose Agent execution', () => {
   test('starts safely, migrates idempotently, reports health, persists data, and stops gracefully', async () => {
     const email = `compose-${crypto.randomUUID()}@example.com`;
+    const idempotencyKey = `compose-e2e-${crypto.randomUUID()}`;
     let apiContainerId = '';
     let workerContainerId = '';
 
@@ -94,29 +95,30 @@ describe.skipIf(!dockerIntegrationEnabled)('Docker Compose PostgreSQL foundation
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'compose-e2e' },
-          body: JSON.stringify({ input: { value: 'compose' }, idempotencyKey: 'compose-e2e-echo' }),
+          body: JSON.stringify({ input: { value: 'compose' }, idempotencyKey }),
         },
       );
       expect(enqueueResponse.status).toBe(202);
       const { jobId } = (await enqueueResponse.json()) as { jobId: string };
 
       let jobStatus = '';
+      let runId: string | null = null;
       for (let attempt = 0; attempt < 60; attempt += 1) {
         const jobResponse = await fetch(
           `http://localhost:${composeEnvironment.API_HOST_PORT}/jobs/${jobId}`,
         );
-        const body = (await jobResponse.json()) as { job: { status: string } };
+        const body = (await jobResponse.json()) as {
+          job: { latestRunId: string | null; status: string };
+        };
         jobStatus = body.job.status;
         if (jobStatus === 'completed') {
+          runId = body.job.latestRunId;
           break;
         }
         await Bun.sleep(250);
       }
       expect(jobStatus).toBe('completed');
-
-      const runId = postgres(
-        `SELECT id FROM agent_runs WHERE job_id = '${jobId}' ORDER BY started_at DESC LIMIT 1;`,
-      );
+      expect(runId).not.toBeNull();
       const runResponse = await fetch(
         `http://localhost:${composeEnvironment.API_HOST_PORT}/runs/${runId}`,
       );
