@@ -74,6 +74,15 @@
       "name": "@ai-agents/config",
       "version": "0.1.0",
     },
+    "packages/connector-google": {
+      "name": "@ai-agents/connector-google",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ai-agents/agent-core": "workspace:*",
+        "@ai-agents/google-oauth": "workspace:*",
+        "zod": "^4.3.6",
+      },
+    },
     "packages/database": {
       "name": "@ai-agents/database",
       "version": "0.1.0",
@@ -90,6 +99,9 @@
     "packages/google-oauth": {
       "name": "@ai-agents/google-oauth",
       "version": "0.1.0",
+      "dependencies": {
+        "@ai-agents/agent-core": "workspace:*",
+      },
     },
     "packages/observability": {
       "name": "@ai-agents/observability",
@@ -110,6 +122,8 @@
     "@ai-agents/api": ["@ai-agents/api@workspace:apps/api"],
 
     "@ai-agents/config": ["@ai-agents/config@workspace:packages/config"],
+
+    "@ai-agents/connector-google": ["@ai-agents/connector-google@workspace:packages/connector-google"],
 
     "@ai-agents/database": ["@ai-agents/database@workspace:packages/database"],
 

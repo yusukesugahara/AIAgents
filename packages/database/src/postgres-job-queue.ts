@@ -14,7 +14,12 @@ import type {
   JobQueue,
   ReleaseJobInput,
 } from '@ai-agents/agent-core';
-import { AgentCoreError, IdempotencyConflictError, RetryableJobError } from '@ai-agents/agent-core';
+import {
+  AgentCoreError,
+  AgentDependencyError,
+  IdempotencyConflictError,
+  RetryableJobError,
+} from '@ai-agents/agent-core';
 import type { DatabaseConnection } from './client';
 
 interface AgentJobRow {
@@ -446,6 +451,9 @@ function toAgentJob(row: AgentJobRow): AgentJob {
 
 function toJobErrorCode(error: Error): string {
   if (error instanceof AgentCoreError) {
+    return error.code;
+  }
+  if (error instanceof AgentDependencyError) {
     return error.code;
   }
   if (error instanceof RetryableJobError) {
