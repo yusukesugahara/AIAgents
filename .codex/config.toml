@@ -1,0 +1,28 @@
+# Keep runtime secrets outside Codex tool and shell access for this project.
+default_permissions = "no-secrets"
+
+[permissions.no-secrets]
+extends = ":workspace"
+
+[permissions.no-secrets.filesystem.":workspace_roots"]
+".env" = "deny"
+".env.local" = "deny"
+".env.development" = "deny"
+".env.development.local" = "deny"
+".env.production" = "deny"
+".env.production.local" = "deny"
+".env.test" = "deny"
+".env.test.local" = "deny"
+"**/.env" = "deny"
+"**/.env.local" = "deny"
+"**/.env.development" = "deny"
+"**/.env.development.local" = "deny"
+"**/.env.production" = "deny"
+"**/.env.production.local" = "deny"
+"**/.env.test" = "deny"
+"**/.env.test.local" = "deny"
+"**/.env.*.local" = "deny"
+
+[shell_environment_policy]
+inherit = "core"
+exclude = ["OPENAI_API_KEY", "*_TOKEN", "*_SECRET", "*_PASSWORD"]
