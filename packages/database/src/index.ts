@@ -4,6 +4,10 @@ import {
   type DatabaseConnection,
 } from './client';
 
+export {
+  PostgresGoogleConnectionRepository,
+  PostgresOAuthStateRepository,
+} from './postgres-google-oauth';
 export type { PostgresJobQueueOptions } from './postgres-job-queue';
 export { PostgresAgentRunRepository, PostgresJobQueue } from './postgres-job-queue';
 export * from './schema';

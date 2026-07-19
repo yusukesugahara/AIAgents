@@ -1,11 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 
 const dockerIntegrationEnabled = process.env.DOCKER_INTEGRATION_TESTS === '1';
+const oauthEmail = `compose-oauth-${crypto.randomUUID()}@example.com`;
 const composeEnvironment = {
   ...process.env,
   API_HOST_PORT: '14000',
+  APP_ENV: 'test',
   COMPOSE_PROJECT_NAME: 'ai_agents_pr02_integration',
+  GOOGLE_CLIENT_ID: 'compose-client-id',
+  GOOGLE_CLIENT_SECRET: 'compose-client-secret',
+  GOOGLE_OAUTH_E2E_EMAIL: oauthEmail,
+  GOOGLE_REDIRECT_URI: 'http://localhost:14000/auth/google/callback',
   POSTGRES_HOST_PORT: '15432',
+  TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
 };
 
 interface CommandResult {
@@ -32,7 +39,10 @@ function runCommand(command: string[], allowFailure = false): CommandResult {
 }
 
 function compose(args: string[], allowFailure = false): CommandResult {
-  return runCommand(['docker', 'compose', ...args], allowFailure);
+  return runCommand(
+    ['docker', 'compose', '-f', 'compose.yaml', '-f', 'compose.e2e.yaml', ...args],
+    allowFailure,
+  );
 }
 
 async function waitForStatus(path: string, expectedStatus: number): Promise<Response> {
@@ -89,6 +99,42 @@ describe.skipIf(!dockerIntegrationEnabled)('Docker Compose Agent execution', () 
 
       compose(['exec', '-T', 'api', 'bun', 'run', 'db:migrate']);
       compose(['exec', '-T', 'api', 'bun', 'run', 'db:migrate']);
+
+      const oauthStart = await fetch(
+        `http://localhost:${composeEnvironment.API_HOST_PORT}/auth/google`,
+        { redirect: 'manual' },
+      );
+      expect(oauthStart.status).toBe(303);
+      const oauthCookie = oauthStart.headers.get('set-cookie')?.split(';')[0] ?? '';
+      const authorizationUrl = oauthStart.headers.get('location') ?? '';
+      expect(oauthCookie).toContain('ai_agents_oauth_nonce=');
+      expect(authorizationUrl).toStartWith(
+        `http://localhost:${composeEnvironment.API_HOST_PORT}/auth/google/callback?`,
+      );
+
+      const oauthCallback = await fetch(authorizationUrl, {
+        headers: { Cookie: oauthCookie },
+        redirect: 'manual',
+      });
+      expect(oauthCallback.status).toBe(303);
+      expect(oauthCallback.headers.get('location')).toBe('/auth/google/complete');
+      expect(oauthCallback.headers.get('location')).not.toContain('fake-authorization-code');
+
+      const storedOAuthConnection = postgres(`
+        SELECT users.email || '|' || connections.encrypted_refresh_token
+        FROM connections
+        JOIN users ON users.id = connections.user_id
+        WHERE connections.google_email = '${oauthEmail}';
+      `);
+      expect(storedOAuthConnection).toStartWith(`${oauthEmail}|v1.`);
+      expect(storedOAuthConnection).not.toContain('fake-refresh-token');
+      expect(
+        postgres(`
+          SELECT COUNT(*)
+          FROM oauth_authorization_states
+          WHERE consumed_at IS NOT NULL;
+        `),
+      ).toBe('1');
 
       const enqueueResponse = await fetch(
         `http://localhost:${composeEnvironment.API_HOST_PORT}/agents/echo/runs`,
@@ -183,5 +229,5 @@ describe.skipIf(!dockerIntegrationEnabled)('Docker Compose Agent execution', () 
     } finally {
       compose(['down', '--volumes', '--remove-orphans'], true);
     }
-  }, 180_000);
+  }, 240_000);
 });

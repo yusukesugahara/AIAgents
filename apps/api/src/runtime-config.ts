@@ -1,11 +1,14 @@
 export function resolveApiAccessToken(environment = process.env): string | undefined {
   const accessToken = environment.API_ACCESS_TOKEN?.trim() || undefined;
-  const allowsUnauthenticatedAccess =
-    environment.APP_ENV === 'development' || environment.APP_ENV === 'test';
+  const allowsUnauthenticatedAccess = !requiresProtectedApi(environment);
 
   if (!allowsUnauthenticatedAccess && !accessToken) {
     throw new Error('API_ACCESS_TOKEN is required unless APP_ENV is development or test');
   }
 
   return accessToken;
+}
+
+export function requiresProtectedApi(environment = process.env): boolean {
+  return environment.APP_ENV !== 'development' && environment.APP_ENV !== 'test';
 }

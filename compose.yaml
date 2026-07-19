@@ -24,6 +24,10 @@ services:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
       - APP_PORT=4000
       - APP_ENV=${APP_ENV:-development}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -54,11 +58,11 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_agents"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d ai_agents"]
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 2s
+      retries: 20
+      start_period: 60s
 
 volumes:
   postgres_data:

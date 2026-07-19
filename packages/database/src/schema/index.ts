@@ -32,19 +32,43 @@ export const users = pgTable('users', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const connections = pgTable('connections', {
-  id: uuid('id').primaryKey().default(sql`uuidv7()`),
-  userId: uuid('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  type: text('type').notNull(),
-  googleEmail: text('google_email').notNull(),
-  encryptedRefreshToken: text('encrypted_refresh_token'),
-  grantedScopes: text('granted_scopes').array(),
-  status: text('status').notNull().default('connected'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const connections = pgTable(
+  'connections',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(),
+    googleEmail: text('google_email').notNull(),
+    encryptedRefreshToken: text('encrypted_refresh_token'),
+    grantedScopes: text('granted_scopes').array(),
+    status: text('status').notNull().default('connected'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('connections_user_id_type_google_email_unique').on(
+      table.userId,
+      table.type,
+      table.googleEmail,
+    ),
+  ],
+);
+
+export const oauthAuthorizationStates = pgTable(
+  'oauth_authorization_states',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    stateHash: text('state_hash').notNull().unique(),
+    browserNonceHash: text('browser_nonce_hash').notNull(),
+    encryptedCodeVerifier: text('encrypted_code_verifier').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('oauth_authorization_states_expires_at_idx').on(table.expiresAt)],
+);
 
 export const agentDefinitions = pgTable('agent_definitions', {
   id: uuid('id').primaryKey().default(sql`uuidv7()`),

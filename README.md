@@ -41,6 +41,14 @@ docker compose up --build
 
 Job は初回を含めて既定で最大 3 回実行され、再試行時は 1 秒、2 秒待機します。
 
+## Google OAuth
+
+Google OAuthを有効にするには、Google Cloud ConsoleでWebアプリケーションのOAuth Clientを作成し、
+`GOOGLE_REDIRECT_URI`（既定値: `http://localhost:4000/auth/google/callback`）を承認済みリダイレクトURIへ登録します。
+localhost以外のリダイレクトURIにはHTTPSが必須です。
+`.env`へClient ID、Client Secret、および`openssl rand -base64 32`で作成した`TOKEN_ENCRYPTION_KEY`を設定後、
+`GET /auth/google`をブラウザで開いて接続します。Gmail本文の読取権限だけを要求し、Refresh Tokenは暗号化して保存します。
+
 DB Integration TestとDocker Compose全体のIntegration Testは、それぞれ次で実行します。
 
 ```bash

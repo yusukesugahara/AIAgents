@@ -9,6 +9,11 @@ import {
   type JobQueue,
 } from '@ai-agents/agent-core';
 import type { DatabaseConnection } from '@ai-agents/database';
+import {
+  GoogleOAuthError,
+  type GoogleOAuthErrorCode,
+  type GoogleOAuthService,
+} from '@ai-agents/google-oauth';
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 
@@ -28,6 +33,9 @@ export interface ApiAppOptions {
   database?: Pick<DatabaseConnection, 'isReady'> &
     Partial<Pick<DatabaseConnection, 'isSchemaReady'>>;
   logger?: ApiLogger;
+  googleOAuth?: Pick<GoogleOAuthService, 'begin' | 'cancel' | 'complete'>;
+  oauthRequired?: boolean;
+  oauthCookieSecure?: boolean;
   queue?: JobQueue;
   registry?: AgentRegistry;
   requestIdGenerator?: () => string;
@@ -68,7 +76,7 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
     try {
       if (
         options.accessToken &&
-        !new URL(context.req.url).pathname.startsWith('/health/') &&
+        !isPublicPath(new URL(context.req.url).pathname) &&
         !hasValidBearerToken(context.req.header('Authorization'), options.accessToken)
       ) {
         return errorResponse(context, 'UNAUTHORIZED', 401, 'Authentication is required');
@@ -88,12 +96,59 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
 
   app.get('/health/live', (context) => context.json({ status: 'ok' }));
 
+  app.get('/auth/google', async (context) => {
+    context.header('Cache-Control', 'no-store');
+    context.header('Referrer-Policy', 'no-referrer');
+    const authorization = await requireGoogleOAuth(options).begin();
+    context.header(
+      'Set-Cookie',
+      serializeOAuthCookie(authorization.browserNonce, options.oauthCookieSecure ?? false),
+    );
+    logger.info({
+      event: 'oauth.google.authorization_started',
+      requestId: context.get('requestId'),
+    });
+    return context.redirect(authorization.authorizationUrl, 303);
+  });
+
+  app.get('/auth/google/callback', async (context) => {
+    const state = context.req.query('state') ?? '';
+    const authorizationError = context.req.query('error');
+    const browserNonce = readCookie(context.req.header('Cookie'), oauthCookieName) ?? '';
+    context.header('Cache-Control', 'no-store');
+    context.header('Referrer-Policy', 'no-referrer');
+    context.header('Set-Cookie', clearOAuthCookie(options.oauthCookieSecure ?? false));
+    const googleOAuth = requireGoogleOAuth(options);
+
+    if (authorizationError) {
+      await googleOAuth.cancel({ browserNonce, state });
+      if (authorizationError === 'access_denied') {
+        throw new GoogleOAuthError('OAUTH_AUTHORIZATION_DENIED', 'Google authorization was denied');
+      }
+      throw new GoogleOAuthError('OAUTH_PROVIDER_FAILURE', 'Google authorization failed');
+    }
+
+    await googleOAuth.complete({
+      browserNonce,
+      code: context.req.query('code') ?? '',
+      state,
+    });
+    logger.info({ event: 'oauth.google.connected', requestId: context.get('requestId') });
+    return context.redirect('/auth/google/complete', 303);
+  });
+
+  app.get('/auth/google/complete', (context) => {
+    context.header('Cache-Control', 'no-store');
+    return context.json({ status: 'completed' });
+  });
+
   app.get('/health/ready', async (context) => {
-    const ready = options.database
+    const databaseReady = options.database
       ? options.database.isSchemaReady
         ? await options.database.isSchemaReady()
         : await options.database.isReady()
       : false;
+    const ready = databaseReady && (!options.oauthRequired || options.googleOAuth !== undefined);
 
     if (!ready) {
       return context.json({ status: 'not_ready' }, 503);
@@ -188,6 +243,22 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
       return errorResponse(context, 'IDEMPOTENCY_CONFLICT', 409, error.message);
     }
 
+    if (error instanceof GoogleOAuthError) {
+      const status =
+        error.code === 'OAUTH_STATE_INVALID' ||
+        error.code === 'OAUTH_AUTHORIZATION_DENIED' ||
+        error.code === 'OAUTH_PROFILE_INVALID' ||
+        error.code === 'OAUTH_REFRESH_TOKEN_MISSING'
+          ? 400
+          : 500;
+      logger.error({
+        code: error.code,
+        event: 'oauth.google.failed',
+        requestId: context.get('requestId'),
+      });
+      return errorResponse(context, error.code, status, oauthErrorMessage(error.code));
+    }
+
     logger.error({
       event: 'api.request.failed',
       message: error instanceof Error ? error.message : 'Unknown error',
@@ -197,6 +268,15 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
   });
 
   return app;
+}
+
+function requireGoogleOAuth(
+  options: ApiAppOptions,
+): Pick<GoogleOAuthService, 'begin' | 'cancel' | 'complete'> {
+  if (!options.googleOAuth) {
+    throw new GoogleOAuthError('OAUTH_CONFIGURATION_INVALID', 'Google OAuth is not configured');
+  }
+  return options.googleOAuth;
 }
 
 function requireRegistry(options: ApiAppOptions): AgentRegistry {
@@ -314,6 +394,52 @@ function hasValidBearerToken(authorization: string | undefined, expectedToken: s
   const expected = encoder.encode(expectedToken);
 
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function isPublicPath(pathname: string): boolean {
+  return (
+    pathname.startsWith('/health/') ||
+    pathname === '/auth/google' ||
+    pathname === '/auth/google/callback' ||
+    pathname === '/auth/google/complete'
+  );
+}
+
+const oauthCookieName = 'ai_agents_oauth_nonce';
+
+function serializeOAuthCookie(value: string, secure: boolean): string {
+  return `${oauthCookieName}=${value}; Path=/auth/google; Max-Age=600; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`;
+}
+
+function clearOAuthCookie(secure: boolean): string {
+  return `${oauthCookieName}=; Path=/auth/google; Max-Age=0; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`;
+}
+
+function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) {
+    return undefined;
+  }
+  return header
+    .split(';')
+    .map((value) => value.trim())
+    .find((value) => value.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+}
+
+function oauthErrorMessage(code: GoogleOAuthErrorCode): string {
+  switch (code) {
+    case 'OAUTH_STATE_INVALID':
+      return 'OAuth authorization is invalid or expired';
+    case 'OAUTH_AUTHORIZATION_DENIED':
+      return 'Google authorization was denied';
+    case 'OAUTH_PROFILE_INVALID':
+      return 'Google account email could not be verified';
+    case 'OAUTH_REFRESH_TOKEN_MISSING':
+      return 'Google did not grant offline access';
+    case 'OAUTH_CONFIGURATION_INVALID':
+    case 'OAUTH_PROVIDER_FAILURE':
+      return 'Google OAuth is temporarily unavailable';
+  }
 }
 
 const consoleLogger: ApiLogger = {
