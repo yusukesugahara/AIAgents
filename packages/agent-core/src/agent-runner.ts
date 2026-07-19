@@ -28,7 +28,7 @@ export class AgentRunner {
 
   constructor(private readonly options: AgentRunnerOptions) {
     this.#now = options.now ?? (() => new Date());
-    this.#runIdGenerator = options.runIdGenerator ?? crypto.randomUUID;
+    this.#runIdGenerator = options.runIdGenerator ?? (() => crypto.randomUUID());
   }
 
   async run(request: AgentRunRequest): Promise<AgentRunResult> {

@@ -177,6 +177,12 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           output: { result: 'ok' },
           completedAt: now,
         });
+        expect(await queue.get(job.id)).toMatchObject({ id: job.id, status: 'queued' });
+        expect(await repository.getRun(completedRunId)).toMatchObject({
+          id: completedRunId,
+          jobId: job.id,
+          status: 'completed',
+        });
 
         await repository.startRun({
           runId: failedRunId,

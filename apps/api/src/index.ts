@@ -1,4 +1,10 @@
-import { createDatabaseConnection, type DatabaseConnection } from '@ai-agents/database';
+import {
+  createDatabaseConnection,
+  type DatabaseConnection,
+  PostgresAgentRunRepository,
+  PostgresJobQueue,
+} from '@ai-agents/database';
+import { createRuntimeAgentRegistry } from '@ai-agents/echo-agent';
 import { createApp } from './app';
 
 const port = Number(process.env.APP_PORT ?? 4000);
@@ -23,7 +29,16 @@ console.info(
   }),
 );
 
-const app = createApp(database ? { database } : {});
+const app = createApp(
+  database
+    ? {
+        database,
+        queue: new PostgresJobQueue(database),
+        registry: createRuntimeAgentRegistry(),
+        runs: new PostgresAgentRunRepository(database),
+      }
+    : {},
+);
 const server = Bun.serve({
   fetch: app.fetch,
   port,

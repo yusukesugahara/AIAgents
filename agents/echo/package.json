@@ -1,0 +1,10 @@
+{
+  "name": "@ai-agents/echo-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ai-agents/agent-core": "workspace:*",
+    "zod": "^4.3.6"
+  }
+}

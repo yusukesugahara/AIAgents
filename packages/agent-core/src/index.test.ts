@@ -49,6 +49,10 @@ class FakeAgentRunRepository implements AgentRunRepository {
   async failRun(run: AgentRunFailure): Promise<void> {
     this.failed.push(run);
   }
+
+  async getRun(): Promise<null> {
+    return null;
+  }
 }
 
 function createRunner(agent = createAgent()) {

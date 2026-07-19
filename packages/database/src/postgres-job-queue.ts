@@ -1,6 +1,7 @@
 import type {
   AgentJob,
   AgentJobStatus,
+  AgentRun,
   AgentRunCompletion,
   AgentRunFailure,
   AgentRunRepository,
@@ -20,12 +21,23 @@ interface AgentJobRow {
   status: AgentJobStatus;
   idempotency_key: string | null;
   attempts: number;
-  available_at: Date;
-  locked_at: Date | null;
+  available_at: Date | string;
+  locked_at: Date | string | null;
   locked_by: string | null;
   last_error: string | null;
-  created_at: Date;
-  completed_at: Date | null;
+  created_at: Date | string;
+  completed_at: Date | string | null;
+}
+
+interface AgentRunRow {
+  id: string;
+  job_id: string;
+  agent_id: string;
+  status: AgentRun['status'];
+  trigger_type: string;
+  error_code: string | null;
+  started_at: Date | string;
+  completed_at: Date | string | null;
 }
 
 const jobColumns = `
@@ -87,6 +99,16 @@ export class PostgresJobQueue implements JobQueue {
     }
 
     return toAgentJob(existing);
+  }
+
+  async get(jobId: string): Promise<AgentJob | null> {
+    const [job] = (await this.database.client`
+      SELECT ${this.database.client.unsafe(jobColumns)}
+      FROM agent_jobs
+      WHERE id = ${jobId}::uuid
+    `) as AgentJobRow[];
+
+    return job ? toAgentJob(job) : null;
   }
 
   async claimNext(input: ClaimNextJobInput): Promise<AgentJob | null> {
@@ -237,6 +259,31 @@ export class PostgresAgentRunRepository implements AgentRunRepository {
       `;
     });
   }
+
+  async getRun(runId: string): Promise<AgentRun | null> {
+    const [run] = (await this.database.client`
+      SELECT
+        runs.id,
+        runs.job_id,
+        runs.agent_id,
+        runs.status,
+        runs.trigger_type,
+        errors.code AS error_code,
+        runs.started_at,
+        runs.completed_at
+      FROM agent_runs AS runs
+      LEFT JOIN LATERAL (
+        SELECT code
+        FROM agent_errors
+        WHERE run_id = runs.id
+        ORDER BY occurred_at DESC
+        LIMIT 1
+      ) AS errors ON TRUE
+      WHERE runs.id = ${runId}::uuid
+    `) as AgentRunRow[];
+
+    return run ? toAgentRun(run) : null;
+  }
 }
 
 function toAgentJob(row: AgentJobRow): AgentJob {
@@ -247,15 +294,32 @@ function toAgentJob(row: AgentJobRow): AgentJob {
     status: row.status,
     idempotencyKey: row.idempotency_key,
     attempts: row.attempts,
-    availableAt: row.available_at,
-    lockedAt: row.locked_at,
+    availableAt: toDate(row.available_at),
+    lockedAt: row.locked_at ? toDate(row.locked_at) : null,
     lockedBy: row.locked_by,
     lastError: row.last_error,
-    createdAt: row.created_at,
-    completedAt: row.completed_at,
+    createdAt: toDate(row.created_at),
+    completedAt: row.completed_at ? toDate(row.completed_at) : null,
+  };
+}
+
+function toAgentRun(row: AgentRunRow): AgentRun {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    agentId: row.agent_id,
+    status: row.status,
+    triggerType: row.trigger_type,
+    errorCode: row.error_code,
+    startedAt: toDate(row.started_at),
+    completedAt: row.completed_at ? toDate(row.completed_at) : null,
   };
 }
 
 function toTimestamp(value: Date): string {
   return value.toISOString();
+}
+
+function toDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
 }

@@ -1,10 +1,11 @@
-import { AgentRegistry, AgentRunner } from '@ai-agents/agent-core';
+import { AgentRunner } from '@ai-agents/agent-core';
 import {
   createDatabaseConnection,
   type DatabaseConnection,
   PostgresAgentRunRepository,
   PostgresJobQueue,
 } from '@ai-agents/database';
+import { createRuntimeAgentRegistry } from '@ai-agents/echo-agent';
 import { startWorker } from './worker';
 
 let database: DatabaseConnection | undefined;
@@ -26,7 +27,7 @@ const worker = await startWorker(
         database,
         queue: new PostgresJobQueue(database),
         runner: new AgentRunner({
-          registry: new AgentRegistry(),
+          registry: createRuntimeAgentRegistry(),
           repository: new PostgresAgentRunRepository(database),
         }),
       }

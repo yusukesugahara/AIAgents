@@ -38,8 +38,20 @@ export interface AgentRunFailure {
   readonly completedAt: Date;
 }
 
+export interface AgentRun {
+  readonly id: string;
+  readonly jobId: string;
+  readonly agentId: string;
+  readonly status: 'running' | 'completed' | 'failed';
+  readonly triggerType: string;
+  readonly errorCode: string | null;
+  readonly startedAt: Date;
+  readonly completedAt: Date | null;
+}
+
 export interface AgentRunRepository {
   startRun(run: AgentRunStart): Promise<void>;
   completeRun(run: AgentRunCompletion): Promise<void>;
   failRun(run: AgentRunFailure): Promise<void>;
+  getRun(runId: string): Promise<AgentRun | null>;
 }

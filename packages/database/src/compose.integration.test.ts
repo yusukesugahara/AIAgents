@@ -89,6 +89,42 @@ describe.skipIf(!dockerIntegrationEnabled)('Docker Compose PostgreSQL foundation
       compose(['exec', '-T', 'api', 'bun', 'run', 'db:migrate']);
       compose(['exec', '-T', 'api', 'bun', 'run', 'db:migrate']);
 
+      const enqueueResponse = await fetch(
+        `http://localhost:${composeEnvironment.API_HOST_PORT}/agents/echo/runs`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'compose-e2e' },
+          body: JSON.stringify({ input: { value: 'compose' }, idempotencyKey: 'compose-e2e-echo' }),
+        },
+      );
+      expect(enqueueResponse.status).toBe(202);
+      const { jobId } = (await enqueueResponse.json()) as { jobId: string };
+
+      let jobStatus = '';
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const jobResponse = await fetch(
+          `http://localhost:${composeEnvironment.API_HOST_PORT}/jobs/${jobId}`,
+        );
+        const body = (await jobResponse.json()) as { job: { status: string } };
+        jobStatus = body.job.status;
+        if (jobStatus === 'completed') {
+          break;
+        }
+        await Bun.sleep(250);
+      }
+      expect(jobStatus).toBe('completed');
+
+      const runId = postgres(
+        `SELECT id FROM agent_runs WHERE job_id = '${jobId}' ORDER BY started_at DESC LIMIT 1;`,
+      );
+      const runResponse = await fetch(
+        `http://localhost:${composeEnvironment.API_HOST_PORT}/runs/${runId}`,
+      );
+      expect(runResponse.status).toBe(200);
+      expect(await runResponse.json()).toMatchObject({
+        run: { id: runId, jobId, status: 'completed' },
+      });
+
       expect(postgres('SHOW server_version;')).toStartWith('18.4');
 
       const userId = postgres(`INSERT INTO users (email) VALUES ('${email}') RETURNING id;`).split(

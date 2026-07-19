@@ -17,6 +17,14 @@
         "@ai-agents/agent-core": "workspace:*",
       },
     },
+    "agents/echo": {
+      "name": "@ai-agents/echo-agent",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ai-agents/agent-core": "workspace:*",
+        "zod": "^4.3.6",
+      },
+    },
     "agents/job-search-email": {
       "name": "@ai-agents/job-search-email",
       "version": "0.1.0",
@@ -28,8 +36,11 @@
       "name": "@ai-agents/api",
       "version": "0.1.0",
       "dependencies": {
+        "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/database": "workspace:*",
+        "@ai-agents/echo-agent": "workspace:*",
         "hono": "^4.11.10",
+        "zod": "^4.3.6",
       },
     },
     "apps/worker": {
@@ -38,6 +49,7 @@
       "dependencies": {
         "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/database": "workspace:*",
+        "@ai-agents/echo-agent": "workspace:*",
       },
     },
     "packages/agent-core": {
@@ -82,6 +94,8 @@
     "@ai-agents/config": ["@ai-agents/config@workspace:packages/config"],
 
     "@ai-agents/database": ["@ai-agents/database@workspace:packages/database"],
+
+    "@ai-agents/echo-agent": ["@ai-agents/echo-agent@workspace:agents/echo"],
 
     "@ai-agents/job-search-email": ["@ai-agents/job-search-email@workspace:agents/job-search-email"],
 

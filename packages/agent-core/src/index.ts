@@ -1,6 +1,7 @@
 export type {
   AgentDefinition,
   AgentManifest,
+  AgentRun,
   AgentRunCompletion,
   AgentRunFailure,
   AgentRunRepository,

@@ -44,6 +44,7 @@ export interface FailJobInput extends CompleteJobInput {
 
 export interface JobQueue {
   enqueue(input: EnqueueJobInput): Promise<AgentJob>;
+  get(jobId: string): Promise<AgentJob | null>;
   claimNext(input: ClaimNextJobInput): Promise<AgentJob | null>;
   complete(input: CompleteJobInput): Promise<void>;
   fail(input: FailJobInput): Promise<void>;

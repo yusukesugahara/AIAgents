@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@ai-agents/agent-core": "workspace:*",
-    "@ai-agents/database": "workspace:*"
+    "@ai-agents/database": "workspace:*",
+    "@ai-agents/echo-agent": "workspace:*"
   }
 }

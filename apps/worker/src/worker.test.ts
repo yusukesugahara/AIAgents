@@ -42,6 +42,10 @@ class FakeJobQueue implements JobQueue {
     throw new Error('Not implemented in FakeJobQueue');
   }
 
+  async get(): Promise<null> {
+    return null;
+  }
+
   async claimNext(input: ClaimNextJobInput): Promise<AgentJob | null> {
     this.claimedBy.push(input);
     return this.jobs.shift() ?? null;
