@@ -41,6 +41,7 @@ export interface StructuredLlmRequest<TOutput> {
   readonly schema: z.ZodType<TOutput>;
   readonly schemaName: string;
   readonly schemaVersion: string;
+  readonly signal?: AbortSignal;
   readonly systemPrompt: string;
   readonly userInput: string;
 }
@@ -84,6 +85,7 @@ export interface OpenAiStructuredResponse {
     }[];
     readonly type: string;
   }[];
+  readonly status?: string;
   readonly usage?: {
     readonly input_tokens?: number;
     readonly output_tokens?: number;
@@ -128,11 +130,13 @@ const defaultTimeoutMs = 30_000;
  */
 export class OpenAiLlmProvider implements LlmProvider {
   readonly #client: OpenAiStructuredClient | undefined;
+  readonly #invocationRepository: LlmInvocationRepository;
   readonly #now: () => Date;
   readonly #timeoutMs: number;
 
-  constructor(private readonly options: OpenAiLlmProviderOptions) {
+  constructor(options: OpenAiLlmProviderOptions) {
     this.#client = options.client ?? createSdkClient(options.apiKey);
+    this.#invocationRepository = options.invocationRepository;
     this.#now = options.now ?? (() => new Date());
     this.#timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
     if (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs <= 0) {
@@ -152,7 +156,9 @@ export class OpenAiLlmProvider implements LlmProvider {
       );
     }
 
+    let aggregateMetadata: LlmInvocationMetadata | undefined;
     for (const attempt of [1, 2]) {
+      const attemptStartedAt = this.#now();
       let result: AttemptResult<TOutput>;
       try {
         result = await this.#generateAttempt(request, this.#client);
@@ -160,7 +166,7 @@ export class OpenAiLlmProvider implements LlmProvider {
         const dependencyError = toOpenAiDependencyError(error);
         await this.#record({
           attempt,
-          durationMs: 0,
+          durationMs: durationBetween(attemptStartedAt, this.#now()),
           model: request.model,
           outcome: 'failed',
           request,
@@ -171,7 +177,7 @@ export class OpenAiLlmProvider implements LlmProvider {
       }
 
       if (result.reason === 'refusal') {
-        const metadata = await this.#record({
+        const attemptMetadata = await this.#record({
           attempt,
           durationMs: result.durationMs,
           model: result.model,
@@ -180,12 +186,13 @@ export class OpenAiLlmProvider implements LlmProvider {
           reviewReason: result.reason,
           usage: result.usage,
         });
+        const metadata = combineInvocationMetadata(aggregateMetadata, attemptMetadata);
         return { metadata, reason: result.reason, status: 'needs_review' };
       }
 
       if (result.reason === 'invalid_output') {
         const finalAttempt = attempt === 2;
-        const metadata = await this.#record({
+        const attemptMetadata = await this.#record({
           attempt,
           durationMs: result.durationMs,
           model: result.model,
@@ -194,13 +201,15 @@ export class OpenAiLlmProvider implements LlmProvider {
           reviewReason: finalAttempt ? result.reason : null,
           usage: result.usage,
         });
+        const metadata = combineInvocationMetadata(aggregateMetadata, attemptMetadata);
         if (finalAttempt) {
           return { metadata, reason: result.reason, status: 'needs_review' };
         }
+        aggregateMetadata = metadata;
         continue;
       }
 
-      const metadata = await this.#record({
+      const attemptMetadata = await this.#record({
         attempt,
         durationMs: result.durationMs,
         model: result.model,
@@ -209,6 +218,7 @@ export class OpenAiLlmProvider implements LlmProvider {
         reviewReason: null,
         usage: result.usage,
       });
+      const metadata = combineInvocationMetadata(aggregateMetadata, attemptMetadata);
       return { data: result.data as TOutput, metadata, status: 'completed' };
     }
 
@@ -221,13 +231,28 @@ export class OpenAiLlmProvider implements LlmProvider {
   ): Promise<AttemptResult<TOutput>> {
     const controller = new AbortController();
     const startedAt = this.#now();
+    const externalSignal = request.signal;
+    let externalAbortHandler: (() => void) | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
+      if (externalSignal?.aborted) {
+        throw new OpenAiCancelledError();
+      }
       const timeoutError = new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
           controller.abort();
           reject(new OpenAiTimeoutError());
         }, this.#timeoutMs);
+      });
+      const cancellationError = new Promise<never>((_, reject) => {
+        if (!externalSignal) {
+          return;
+        }
+        externalAbortHandler = () => {
+          controller.abort();
+          reject(new OpenAiCancelledError());
+        };
+        externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
       });
       const response = await Promise.race([
         client.parse(
@@ -241,10 +266,14 @@ export class OpenAiLlmProvider implements LlmProvider {
           { signal: controller.signal },
         ),
         timeoutError,
+        cancellationError,
       ]);
       const model = response.model ?? request.model;
       const usage = normalizeUsage(response.usage);
       const durationMs = durationBetween(startedAt, this.#now());
+      if (response.status && response.status !== 'completed') {
+        return { durationMs, model, reason: 'invalid_output', usage };
+      }
       const refusal = findRefusal(response);
       if (refusal) {
         return { durationMs, model, reason: 'refusal', usage };
@@ -258,6 +287,9 @@ export class OpenAiLlmProvider implements LlmProvider {
     } finally {
       if (timeout) {
         clearTimeout(timeout);
+      }
+      if (externalAbortHandler) {
+        externalSignal?.removeEventListener('abort', externalAbortHandler);
       }
     }
   }
@@ -274,7 +306,7 @@ export class OpenAiLlmProvider implements LlmProvider {
     const estimatedCostUsd = estimateOpenAiCostUsd(input.model, input.usage);
     const createdAt = this.#now();
     try {
-      await this.options.invocationRepository.recordInvocation({
+      await this.#invocationRepository.recordInvocation({
         attempt: input.attempt,
         createdAt,
         durationMs: input.durationMs,
@@ -325,16 +357,54 @@ class OpenAiSdkClient implements OpenAiStructuredClient {
     },
     options?: { readonly signal?: AbortSignal },
   ): Promise<OpenAiStructuredResponse> {
-    return (await this.client.responses.parse(
+    let format: ReturnType<typeof zodTextFormat>;
+    try {
+      format = zodTextFormat(request.schema, request.schemaName);
+    } catch (error) {
+      throw new AgentDependencyError(
+        'INVALID_REQUEST',
+        false,
+        'OpenAI structured output schema is invalid',
+        { cause: error },
+      );
+    }
+
+    const response = await this.client.responses.create(
       {
         input: request.userInput,
         instructions: request.systemPrompt,
         model: request.model,
         store: false,
-        text: { format: zodTextFormat(request.schema, request.schemaName) },
+        text: { format },
       },
       options,
-    )) as unknown as OpenAiStructuredResponse;
+    );
+
+    return {
+      model: response.model,
+      output: response.output.map((output) => ({
+        content:
+          output.type === 'message'
+            ? output.content.map((content) => {
+                if (content.type === 'output_text') {
+                  return { parsed: parseJson(content.text), type: content.type };
+                }
+                return { refusal: content.refusal, type: content.type };
+              })
+            : [],
+        type: output.type,
+      })),
+      ...(response.status ? { status: response.status } : {}),
+      ...(response.usage
+        ? {
+            usage: {
+              input_tokens: response.usage.input_tokens,
+              output_tokens: response.usage.output_tokens,
+              total_tokens: response.usage.total_tokens,
+            },
+          }
+        : {}),
+    };
   }
 }
 
@@ -342,6 +412,13 @@ class OpenAiTimeoutError extends Error {
   constructor() {
     super('OpenAI request timed out');
     this.name = 'OpenAiTimeoutError';
+  }
+}
+
+class OpenAiCancelledError extends Error {
+  constructor() {
+    super('OpenAI request was cancelled');
+    this.name = 'AbortError';
   }
 }
 
@@ -355,16 +432,22 @@ const openAiPricingCatalog = {
 } as const;
 
 export const openAiPricingCatalogVersion = '2026-07-19';
+const longContextInputThreshold = 272_000;
+const longContextInputMultiplier = 2;
+const longContextOutputMultiplier = 1.5;
 
 export function estimateOpenAiCostUsd(model: string, usage: LlmUsage): number | null {
   const pricing = openAiPricingCatalog[model as keyof typeof openAiPricingCatalog];
   if (!pricing) {
     return null;
   }
+  const longContext = usage.inputTokens > longContextInputThreshold;
+  const inputMultiplier = longContext ? longContextInputMultiplier : 1;
+  const outputMultiplier = longContext ? longContextOutputMultiplier : 1;
   return Number(
     (
-      (usage.inputTokens * pricing.inputPerMillionUsd +
-        usage.outputTokens * pricing.outputPerMillionUsd) /
+      (usage.inputTokens * pricing.inputPerMillionUsd * inputMultiplier +
+        usage.outputTokens * pricing.outputPerMillionUsd * outputMultiplier) /
       1_000_000
     ).toFixed(8),
   );
@@ -374,7 +457,29 @@ function createSdkClient(apiKey: string | undefined): OpenAiStructuredClient | u
   if (!apiKey?.trim()) {
     return undefined;
   }
-  return new OpenAiSdkClient(new OpenAI({ apiKey }));
+  return new OpenAiSdkClient(new OpenAI({ apiKey, maxRetries: 0 }));
+}
+
+function combineInvocationMetadata(
+  previous: LlmInvocationMetadata | undefined,
+  current: LlmInvocationMetadata,
+): LlmInvocationMetadata {
+  if (!previous) {
+    return current;
+  }
+  return {
+    ...current,
+    durationMs: previous.durationMs + current.durationMs,
+    estimatedCostUsd:
+      previous.estimatedCostUsd === null || current.estimatedCostUsd === null
+        ? null
+        : Number((previous.estimatedCostUsd + current.estimatedCostUsd).toFixed(8)),
+    usage: {
+      inputTokens: previous.usage.inputTokens + current.usage.inputTokens,
+      outputTokens: previous.usage.outputTokens + current.usage.outputTokens,
+      totalTokens: previous.usage.totalTokens + current.usage.totalTokens,
+    },
+  };
 }
 
 function durationBetween(startedAt: Date, completedAt: Date): number {
@@ -414,6 +519,14 @@ function nonNegativeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+function parseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
 function toOpenAiDependencyError(error: unknown): AgentDependencyError {
   if (error instanceof AgentDependencyError) {
     return error;
@@ -426,7 +539,6 @@ function toOpenAiDependencyError(error: unknown): AgentDependencyError {
       'TEMPORARY_UNAVAILABLE',
       true,
       'OpenAI service is temporarily unavailable',
-      { cause: error },
     );
   }
   const status =
@@ -438,30 +550,25 @@ function toOpenAiDependencyError(error: unknown): AgentDependencyError {
       'AUTHENTICATION_REQUIRED',
       false,
       'OpenAI authentication failed',
-      { cause: error },
     );
   }
   if (status === 403) {
-    return new AgentDependencyError('PERMISSION_DENIED', false, 'OpenAI access was denied', {
-      cause: error,
-    });
+    return new AgentDependencyError('PERMISSION_DENIED', false, 'OpenAI access was denied');
   }
-  if (status === 400) {
-    return new AgentDependencyError('INVALID_REQUEST', false, 'OpenAI rejected the request', {
-      cause: error,
-    });
+  if (status === 404) {
+    return new AgentDependencyError('NOT_FOUND', false, 'OpenAI resource was not found');
+  }
+  if (status === 400 || status === 422) {
+    return new AgentDependencyError('INVALID_REQUEST', false, 'OpenAI rejected the request');
   }
   if (status === 429) {
-    return new AgentDependencyError('RATE_LIMITED', true, 'OpenAI rate limit was exceeded', {
-      cause: error,
-    });
+    return new AgentDependencyError('RATE_LIMITED', true, 'OpenAI rate limit was exceeded');
   }
-  if (status === 408 || (status !== undefined && status >= 500)) {
+  if (status === 408 || status === 409 || (status !== undefined && status >= 500)) {
     return new AgentDependencyError(
       'TEMPORARY_UNAVAILABLE',
       true,
       'OpenAI service is temporarily unavailable',
-      { cause: error },
     );
   }
   if (status === undefined) {
@@ -469,10 +576,9 @@ function toOpenAiDependencyError(error: unknown): AgentDependencyError {
       'TEMPORARY_UNAVAILABLE',
       true,
       'OpenAI service is temporarily unavailable',
-      { cause: error },
     );
   }
-  return new AgentDependencyError('UNKNOWN', false, 'OpenAI request failed', { cause: error });
+  return new AgentDependencyError('UNKNOWN', false, 'OpenAI request failed');
 }
 
 function validateRequest<TOutput>(request: StructuredLlmRequest<TOutput>): void {
@@ -485,8 +591,11 @@ function validateRequest<TOutput>(request: StructuredLlmRequest<TOutput>): void 
     systemPrompt: request.systemPrompt,
     userInput: request.userInput,
   })) {
-    if (!value.trim()) {
+    if (typeof value !== 'string' || !value.trim()) {
       throw new AgentDependencyError('INVALID_REQUEST', false, `LLM ${label} must not be empty`);
     }
+  }
+  if (!request.schema || typeof request.schema.safeParse !== 'function') {
+    throw new AgentDependencyError('INVALID_REQUEST', false, 'LLM schema is invalid');
   }
 }

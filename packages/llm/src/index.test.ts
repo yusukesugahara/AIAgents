@@ -123,7 +123,11 @@ describe('OpenAiLlmProvider', () => {
 
     await expect(provider.generateStructured(createRequest())).resolves.toMatchObject({
       data: { category: 'other' },
-      metadata: { attempts: 2 },
+      metadata: {
+        attempts: 2,
+        estimatedCostUsd: 0.011,
+        usage: { inputTokens: 2_000, outputTokens: 400, totalTokens: 2_400 },
+      },
       status: 'completed',
     });
     expect(repository.records.map((record) => record.outcome)).toEqual([
@@ -169,9 +173,31 @@ describe('OpenAiLlmProvider', () => {
     ]);
   });
 
+  test('never accepts incomplete Responses output as a completed result', async () => {
+    const repository = new FakeInvocationRepository();
+    const incomplete = { ...parsedResponse({ category: 'other' }), status: 'incomplete' };
+    const provider = new OpenAiLlmProvider({
+      client: new FakeOpenAiClient([incomplete, incomplete]),
+      invocationRepository: repository,
+    });
+
+    await expect(provider.generateStructured(createRequest())).resolves.toMatchObject({
+      reason: 'invalid_output',
+      status: 'needs_review',
+    });
+    expect(repository.records.map((record) => record.outcome)).toEqual([
+      'invalid_output',
+      'needs_review',
+    ]);
+  });
+
   test('maps timeouts and provider statuses without leaking provider details', async () => {
     const cases = [
       { code: 'AUTHENTICATION_REQUIRED', retryable: false, status: 401 },
+      { code: 'PERMISSION_DENIED', retryable: false, status: 403 },
+      { code: 'NOT_FOUND', retryable: false, status: 404 },
+      { code: 'TEMPORARY_UNAVAILABLE', retryable: true, status: 409 },
+      { code: 'INVALID_REQUEST', retryable: false, status: 422 },
       { code: 'RATE_LIMITED', retryable: true, status: 429 },
       { code: 'TEMPORARY_UNAVAILABLE', retryable: true, status: 503 },
     ] as const;
@@ -183,10 +209,16 @@ describe('OpenAiLlmProvider', () => {
         ]),
         invocationRepository: repository,
       });
-      await expect(provider.generateStructured(createRequest())).rejects.toMatchObject({
-        code: expected.code,
-        retryable: expected.retryable,
-      });
+      try {
+        await provider.generateStructured(createRequest());
+        throw new Error('Expected provider failure');
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: expected.code,
+          retryable: expected.retryable,
+        });
+        expect((error as Error).cause).toBeUndefined();
+      }
       expect(repository.records).toEqual([
         expect.objectContaining({ outcome: 'failed', reviewReason: null }),
       ]);
@@ -212,6 +244,57 @@ describe('OpenAiLlmProvider', () => {
     });
   });
 
+  test('records elapsed time for failed provider calls', async () => {
+    const repository = new FakeInvocationRepository();
+    const times = [0, 10, 25, 30].map((milliseconds) => new Date(milliseconds));
+    const provider = new OpenAiLlmProvider({
+      client: new FakeOpenAiClient([Object.assign(new Error('unavailable'), { status: 503 })]),
+      invocationRepository: repository,
+      now: () => times.shift() ?? new Date(30),
+    });
+
+    await expect(provider.generateStructured(createRequest())).rejects.toBeInstanceOf(
+      AgentDependencyError,
+    );
+    expect(repository.records).toEqual([expect.objectContaining({ durationMs: 25 })]);
+  });
+
+  test('propagates an external cancellation without waiting for the provider timeout', async () => {
+    const repository = new FakeInvocationRepository();
+    const abortController = new AbortController();
+    const provider = new OpenAiLlmProvider({
+      client: new FakeOpenAiClient([new Promise<OpenAiStructuredResponse>(() => undefined)]),
+      invocationRepository: repository,
+      timeoutMs: 30_000,
+    });
+
+    const result = provider.generateStructured({
+      ...createRequest(),
+      signal: abortController.signal,
+    });
+    abortController.abort('lease lost');
+
+    await expect(result).rejects.toMatchObject({
+      code: 'TEMPORARY_UNAVAILABLE',
+      retryable: true,
+    });
+    expect(repository.records).toEqual([expect.objectContaining({ outcome: 'failed' })]);
+  });
+
+  test('rejects malformed runtime requests as permanent input errors', async () => {
+    const provider = new OpenAiLlmProvider({
+      client: new FakeOpenAiClient([parsedResponse({ category: 'other' })]),
+      invocationRepository: new FakeInvocationRepository(),
+    });
+
+    await expect(
+      provider.generateStructured({ ...createRequest(), model: 42 } as never),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
+    await expect(
+      provider.generateStructured({ ...createRequest(), schema: null } as never),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
+  });
+
   test('fails closed for missing credentials and retryably for metadata persistence failures', async () => {
     await expect(
       new OpenAiLlmProvider({
@@ -231,6 +314,15 @@ describe('OpenAiLlmProvider', () => {
     });
   });
 
+  test('does not expose the API key when the provider instance is serialized', () => {
+    const provider = new OpenAiLlmProvider({
+      apiKey: 'secret-api-key',
+      invocationRepository: new FakeInvocationRepository(),
+    });
+
+    expect(JSON.stringify(provider)).not.toContain('secret-api-key');
+  });
+
   test('uses only the versioned pricing catalog and leaves unknown models unpriced', () => {
     expect(
       estimateOpenAiCostUsd('gpt-5.6-luna', {
@@ -238,7 +330,7 @@ describe('OpenAiLlmProvider', () => {
         outputTokens: 1_000_000,
         totalTokens: 2_000_000,
       }),
-    ).toBe(7);
+    ).toBe(11);
     expect(
       estimateOpenAiCostUsd('unpriced-model', {
         inputTokens: 1,
@@ -246,6 +338,20 @@ describe('OpenAiLlmProvider', () => {
         totalTokens: 2,
       }),
     ).toBeNull();
+    expect(
+      estimateOpenAiCostUsd('gpt-5.6-luna', {
+        inputTokens: 272_000,
+        outputTokens: 100_000,
+        totalTokens: 372_000,
+      }),
+    ).toBe(0.872);
+    expect(
+      estimateOpenAiCostUsd('gpt-5.6-luna', {
+        inputTokens: 272_001,
+        outputTokens: 100_000,
+        totalTokens: 372_001,
+      }),
+    ).toBe(1.444002);
   });
 });
 
