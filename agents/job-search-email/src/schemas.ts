@@ -156,20 +156,43 @@ export const jobSearchEmailInputSchema = z
   })
   .strict();
 
+export const generatedReplySchema = z
+  .object({
+    body: z
+      .string()
+      .trim()
+      .min(1)
+      .max(16 * 1024)
+      .refine(
+        (value) => !value.includes(String.fromCharCode(0)),
+        'Reply body must not contain NUL',
+      ),
+    confidence: z.number().min(0).max(1),
+    warnings: z.array(z.string().trim().min(1).max(200)).max(10),
+  })
+  .strict();
+
 export const jobSearchEmailOutputSchema = z
   .object({
     analysis: jobEmailAnalysisSchema.nullable(),
-    draftId: z.null(),
+    draftId: z.string().trim().min(1).max(255).nullable(),
     calendarEventId: z.null(),
     result: z.enum(['completed', 'skipped', 'needs_review']),
   })
   .strict()
   .superRefine((output, context) => {
-    if ((output.result === 'needs_review') !== (output.analysis === null)) {
+    if (output.analysis === null && output.result !== 'needs_review') {
       context.addIssue({
         code: 'custom',
         message: 'Only a needs-review result may omit analysis',
         path: ['analysis'],
+      });
+    }
+    if (output.result !== 'completed' && output.draftId !== null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Only completed results may contain a Draft ID',
+        path: ['draftId'],
       });
     }
     if (output.result === 'skipped' && output.analysis?.isJobRelated !== false) {
@@ -189,5 +212,6 @@ export const jobSearchEmailOutputSchema = z
   });
 
 export type JobEmailAnalysis = z.infer<typeof jobEmailAnalysisSchema>;
+export type GeneratedReply = z.infer<typeof generatedReplySchema>;
 export type JobSearchEmailInput = z.infer<typeof jobSearchEmailInputSchema>;
 export type JobSearchEmailOutput = z.infer<typeof jobSearchEmailOutputSchema>;

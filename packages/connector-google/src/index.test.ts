@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import type { GoogleAccessTokenProvider } from '@ai-agents/google-oauth';
-import { HttpGmailReader } from './index';
+import {
+  createReplyMime,
+  deterministicDraftMessageId,
+  HttpGmailDraftWriter,
+  HttpGmailReader,
+} from './index';
 
 const base64Url = (value: string | Uint8Array) => Buffer.from(value).toString('base64url');
 const connectionId = '018f7f9a-7b2c-7abc-8def-0123456789ab';
@@ -8,9 +13,11 @@ const connectionId = '018f7f9a-7b2c-7abc-8def-0123456789ab';
 class FakeAccessTokens implements GoogleAccessTokenProvider {
   calls = 0;
   invalidations: string[] = [];
+  scopes: Array<readonly string[] | undefined> = [];
 
-  async getAccessToken(): Promise<string> {
+  async getAccessToken(_connectionId?: string, scopes?: readonly string[]): Promise<string> {
     this.calls += 1;
+    this.scopes.push(scopes);
     return `access-${this.calls}`;
   }
 
@@ -42,6 +49,7 @@ function emailMessage(overrides: Record<string, unknown> = {}) {
         { name: 'Subject', value: ' Interview ' },
         { name: 'Message-ID', value: '<message@example.com>' },
         { name: 'In-Reply-To', value: '<previous@example.com>' },
+        { name: 'Reply-To', value: 'Replies <replies@example.com>' },
         { name: 'References', value: '<root@example.com> <previous@example.com>' },
       ],
       mimeType: 'multipart/alternative',
@@ -104,6 +112,7 @@ describe('HttpGmailReader', () => {
       inReplyTo: '<previous@example.com>',
       labelIds: ['INBOX'],
       messageId: '<message@example.com>',
+      replyTo: 'Replies <replies@example.com>',
       references: ['<root@example.com>', '<previous@example.com>'],
       sentAt: new Date('2026-07-19T00:00:00.000Z'),
       subject: 'Interview',
@@ -237,6 +246,7 @@ describe('HttpGmailReader', () => {
         from: '',
         inReplyTo: null,
         messageId: null,
+        replyTo: null,
         references: [],
         subject: '',
         to: [],
@@ -409,5 +419,141 @@ describe('HttpGmailReader', () => {
     await expect(
       reader.getMessage({ googleConnectionId: connectionId, gmailMessageId: 'message-1' }),
     ).rejects.toMatchObject({ code: 'TEMPORARY_UNAVAILABLE', retryable: true });
+  });
+});
+
+describe('HttpGmailDraftWriter', () => {
+  test('creates a deterministic MIME reply with safe threading headers', () => {
+    const idempotencyKey = 'gmail-draft:connection:message:policy-v1';
+    const raw = createReplyMime({
+      body: 'ご連絡ありがとうございます。\nよろしくお願いいたします。',
+      from: 'candidate@example.com',
+      idempotencyKey,
+      inReplyTo: '<source@example.com>',
+      references: ['<root@example.com>'],
+      subject: '面接日程のご連絡',
+      to: 'recruiter@example.com',
+    });
+    const mime = Buffer.from(raw, 'base64url').toString('utf8');
+
+    expect(mime).toContain('From: candidate@example.com\r\n');
+    expect(mime).toContain('To: recruiter@example.com\r\n');
+    expect(mime).toContain('Subject: =?UTF-8?B?');
+    expect(mime).toContain('In-Reply-To: <source@example.com>\r\n');
+    expect(mime).toContain('References: <root@example.com> <source@example.com>\r\n');
+    expect(mime).toContain(`Message-ID: ${deterministicDraftMessageId(idempotencyKey)}\r\n`);
+    expect(mime).toContain('Content-Transfer-Encoding: base64\r\n');
+    expect(mime).not.toContain('ご連絡ありがとうございます');
+    expect(Buffer.from(raw, 'base64url').toString('utf8')).toContain(
+      Buffer.from('ご連絡ありがとうございます。', 'utf8').toString('base64'),
+    );
+  });
+
+  test('folds a long UTF-8 subject into RFC 2047-sized encoded words', () => {
+    const raw = createReplyMime({
+      body: '本文です。',
+      from: 'candidate@example.com',
+      idempotencyKey: 'gmail-draft:connection:message:policy-v1',
+      inReplyTo: '<source@example.com>',
+      references: [],
+      subject: '面接'.repeat(100),
+      to: 'recruiter@example.com',
+    });
+    const mime = Buffer.from(raw, 'base64url').toString('utf8');
+    const subjectWords = mime
+      .split('\r\n')
+      .filter((line) => line.startsWith('Subject: ') || line.startsWith(' =?UTF-8?B?'))
+      .map((line) => line.replace(/^Subject: |^ /u, ''));
+
+    expect(subjectWords).toHaveLength(14);
+    expect(subjectWords.every((word) => word.length <= 75)).toBe(true);
+    expect(subjectWords.every((word) => /^=\?UTF-8\?B\?.+\?=$/u.test(word))).toBe(true);
+  });
+
+  test('bounds and folds untrusted References headers', () => {
+    const references = Array.from(
+      { length: 25 },
+      (_, index) => `<${String(index).padStart(2, '0')}-${'a'.repeat(470)}@example.com>`,
+    );
+    const raw = createReplyMime({
+      body: '本文です。',
+      from: 'candidate@example.com',
+      idempotencyKey: 'gmail-draft:connection:message:policy-v1',
+      inReplyTo: '<source@example.com>',
+      references: [...references, '<bad\r\nBcc: attacker@example.com>'],
+      subject: 'Re: Interview',
+      to: 'recruiter@example.com',
+    });
+    const mime = Buffer.from(raw, 'base64url').toString('utf8');
+    const referenceLines = mime
+      .split('\r\n')
+      .filter((line) => line.startsWith('References: ') || line.startsWith(' <'));
+
+    expect(mime).not.toContain(references[0] as string);
+    expect(mime).toContain(references[24] as string);
+    expect(mime).not.toContain('Bcc: attacker@example.com');
+    expect(referenceLines.every((line) => Buffer.byteLength(line, 'utf8') <= 912)).toBe(true);
+  });
+
+  test('finds an existing reply Draft by deterministic Message-ID without creating another Draft', async () => {
+    const tokens = new FakeAccessTokens();
+    let requestUrl: URL | undefined;
+    const writer = new HttpGmailDraftWriter({
+      accessTokens: tokens,
+      fetchImplementation: async (input) => {
+        requestUrl = new URL(String(input));
+        return response({
+          drafts: [{ id: 'draft-1', message: { id: 'draft-message-1', threadId: 'thread-1' } }],
+        });
+      },
+    });
+    const idempotencyKey = 'gmail-draft:connection:message:policy-v1';
+
+    await expect(
+      writer.findReplyDraft({
+        googleConnectionId: connectionId,
+        gmailThreadId: 'thread-1',
+        idempotencyKey,
+      }),
+    ).resolves.toEqual({ draftId: 'draft-1', messageId: 'draft-message-1', threadId: 'thread-1' });
+    expect(requestUrl?.pathname).toBe('/gmail/v1/users/me/drafts');
+    expect(requestUrl?.searchParams.get('q')).toBe(
+      `rfc822msgid:${deterministicDraftMessageId(idempotencyKey)}`,
+    );
+    expect(tokens.scopes).toEqual([['https://www.googleapis.com/auth/gmail.compose']]);
+  });
+
+  test('creates an unsent Draft in the requested Gmail thread', async () => {
+    let method = '';
+    let payload: unknown;
+    const writer = new HttpGmailDraftWriter({
+      accessTokens: new FakeAccessTokens(),
+      fetchImplementation: async (_input, init) => {
+        method = init?.method ?? '';
+        payload = JSON.parse(String(init?.body));
+        return response({
+          id: 'draft-1',
+          message: { id: 'draft-message-1', threadId: 'thread-1' },
+        });
+      },
+    });
+
+    await expect(
+      writer.createReplyDraft({
+        body: 'ありがとうございます。',
+        from: 'candidate@example.com',
+        gmailThreadId: 'thread-1',
+        googleConnectionId: connectionId,
+        idempotencyKey: 'gmail-draft:connection:message:policy-v1',
+        inReplyTo: '<source@example.com>',
+        references: [],
+        subject: 'Re: Interview',
+        to: 'recruiter@example.com',
+      }),
+    ).resolves.toEqual({ draftId: 'draft-1', messageId: 'draft-message-1', threadId: 'thread-1' });
+    expect(method).toBe('POST');
+    expect(payload).toEqual({
+      message: { raw: expect.any(String), threadId: 'thread-1' },
+    });
   });
 });

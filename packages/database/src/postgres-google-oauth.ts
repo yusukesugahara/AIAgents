@@ -4,6 +4,7 @@ import type {
   GoogleConnectionRecord,
   GoogleConnectionRepository,
   GoogleConnectionUpsertInput,
+  GoogleOAuthPurpose,
   OAuthStateRecord,
   OAuthStateRepository,
 } from '@ai-agents/google-oauth';
@@ -16,15 +17,16 @@ export class PostgresOAuthStateRepository implements OAuthStateRepository {
     readonly browserNonceHash: string;
     readonly encryptedCodeVerifier: string;
     readonly expiresAt: Date;
+    readonly purpose?: GoogleOAuthPurpose;
     readonly stateHash: string;
   }): Promise<void> {
     await this.database.client`
       INSERT INTO oauth_authorization_states (
-        state_hash, browser_nonce_hash, encrypted_code_verifier, expires_at
+        state_hash, browser_nonce_hash, encrypted_code_verifier, authorization_purpose, expires_at
       )
       VALUES (
         ${input.stateHash}, ${input.browserNonceHash}, ${input.encryptedCodeVerifier},
-        ${input.expiresAt.toISOString()}
+        ${input.purpose ?? 'gmail_read'}, ${input.expiresAt.toISOString()}
       )
     `;
   }
@@ -40,9 +42,14 @@ export class PostgresOAuthStateRepository implements OAuthStateRepository {
         AND browser_nonce_hash = ${input.browserNonceHash}
         AND consumed_at IS NULL
         AND expires_at > NOW()
-      RETURNING encrypted_code_verifier
-    `) as Array<{ encrypted_code_verifier: string }>;
-    return state ? { encryptedCodeVerifier: state.encrypted_code_verifier } : null;
+      RETURNING encrypted_code_verifier, authorization_purpose
+    `) as Array<{ encrypted_code_verifier: string; authorization_purpose: GoogleOAuthPurpose }>;
+    return state
+      ? {
+          encryptedCodeVerifier: state.encrypted_code_verifier,
+          purpose: state.authorization_purpose,
+        }
+      : null;
   }
 
   async deleteExpired(): Promise<void> {

@@ -10,6 +10,7 @@ export interface JobRuntimeConfig {
 export interface JobEmailAnalysisRuntimeConfig {
   readonly openAiApiKey: string;
   readonly openAiModel: string;
+  readonly openAiReplyModel: string;
 }
 
 export function loadJobEmailAnalysisRuntimeConfig(
@@ -17,13 +18,17 @@ export function loadJobEmailAnalysisRuntimeConfig(
 ): JobEmailAnalysisRuntimeConfig {
   const openAiApiKey = environment.OPENAI_API_KEY?.trim();
   const openAiModel = environment.OPENAI_ANALYSIS_MODEL?.trim();
+  const openAiReplyModel = environment.OPENAI_REPLY_MODEL?.trim();
   if (!openAiApiKey) {
     throw new Error('OPENAI_API_KEY is required by the Job Search Email Agent');
   }
   if (!openAiModel) {
     throw new Error('OPENAI_ANALYSIS_MODEL is required by the Job Search Email Agent');
   }
-  return { openAiApiKey, openAiModel };
+  if (!openAiReplyModel) {
+    throw new Error('OPENAI_REPLY_MODEL is required by the Job Search Email Agent');
+  }
+  return { openAiApiKey, openAiModel, openAiReplyModel };
 }
 
 export function loadJobRuntimeConfig(environment = process.env): JobRuntimeConfig {

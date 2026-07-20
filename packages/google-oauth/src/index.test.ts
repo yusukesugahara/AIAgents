@@ -13,6 +13,7 @@ import {
   GoogleOAuthService,
   GoogleRefreshTokenError,
   type GoogleTokenSet,
+  gmailComposeScope,
   HttpGoogleOAuthProvider,
   HttpGoogleTokenRefresher,
   loadGoogleAccessTokenConfig,
@@ -32,11 +33,15 @@ class FakeStates implements OAuthStateRepository {
     readonly browserNonceHash: string;
     readonly encryptedCodeVerifier: string;
     readonly expiresAt: Date;
+    readonly purpose?: OAuthStateRecord['purpose'];
     readonly stateHash: string;
   }): Promise<void> {
     this.records.set(input.stateHash, {
       browserNonceHash: input.browserNonceHash,
-      record: { encryptedCodeVerifier: input.encryptedCodeVerifier },
+      record: {
+        encryptedCodeVerifier: input.encryptedCodeVerifier,
+        ...(input.purpose ? { purpose: input.purpose } : {}),
+      },
     });
   }
 
@@ -86,6 +91,11 @@ class FakeConnections implements GoogleConnectionRepository {
 }
 
 class FakeProvider implements GoogleOAuthProvider {
+  authorizationRequests: Array<{
+    codeChallenge: string;
+    scopes?: readonly string[];
+    state: string;
+  }> = [];
   lastCodeVerifier: string | undefined;
   profile = { email: 'person@example.com', emailVerified: true };
   tokens: GoogleTokenSet = {
@@ -96,9 +106,11 @@ class FakeProvider implements GoogleOAuthProvider {
 
   createAuthorizationUrl(request: {
     readonly codeChallenge: string;
+    readonly scopes?: readonly string[];
     readonly state: string;
   }): string {
-    return `https://provider.example/authorize?${new URLSearchParams(request).toString()}`;
+    this.authorizationRequests.push(request);
+    return `https://provider.example/authorize?${new URLSearchParams({ codeChallenge: request.codeChallenge, state: request.state }).toString()}`;
   }
 
   async exchangeAuthorizationCode(input: { readonly code: string; readonly codeVerifier: string }) {
@@ -185,6 +197,24 @@ describe('Google OAuth', () => {
         state,
       }),
     ).rejects.toMatchObject({ code: 'OAUTH_STATE_INVALID' });
+  });
+
+  test('requests and records the compose scope for a Draft authorization', async () => {
+    const { connections, provider, service } = createService();
+    provider.tokens = {
+      ...provider.tokens,
+      grantedScopes: [...provider.tokens.grantedScopes, gmailComposeScope],
+    };
+    const authorization = await service.begin('gmail_compose');
+    const state = new URL(authorization.authorizationUrl).searchParams.get('state') ?? '';
+
+    expect(provider.authorizationRequests[0]?.scopes).toContain(gmailComposeScope);
+    await service.complete({
+      browserNonce: authorization.browserNonce,
+      code: 'authorization-code',
+      state,
+    });
+    expect(connections.saved[0]?.grantedScopes).toContain(gmailComposeScope);
   });
 
   test('rejects a callback from a different browser without consuming its state', async () => {
@@ -549,6 +579,23 @@ describe('Google access token service', () => {
         refresher,
       }).getAccessToken(connectionId),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED', retryable: false });
+  });
+
+  test('does not reuse a read-only cached token for a compose request', async () => {
+    const cipher = AesGcmTokenCipher.fromBase64Key(encryptionKey);
+    const credentials = new FakeCredentials({
+      encryptedRefreshToken: cipher.encrypt('refresh-secret'),
+      grantedScopes: [gmailScope],
+    });
+    const refresher = new FakeRefresher();
+    const service = new GoogleAccessTokenService({ cipher, credentials, refresher });
+
+    await expect(service.getAccessToken(connectionId, [gmailScope])).resolves.toBe('access-1');
+    await expect(service.getAccessToken(connectionId, [gmailComposeScope])).rejects.toMatchObject({
+      code: 'PERMISSION_DENIED',
+      retryable: false,
+    });
+    expect(refresher.calls).toBe(1);
   });
 
   test('marks invalid refresh tokens as requiring reauthorization and maps temporary failures', async () => {

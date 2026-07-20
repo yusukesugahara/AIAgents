@@ -65,6 +65,7 @@ export const oauthAuthorizationStates = pgTable(
     stateHash: text('state_hash').notNull().unique(),
     browserNonceHash: text('browser_nonce_hash').notNull(),
     encryptedCodeVerifier: text('encrypted_code_verifier').notNull(),
+    authorizationPurpose: text('authorization_purpose').notNull().default('gmail_read'),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     consumedAt: timestamp('consumed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -81,17 +82,23 @@ export const agentDefinitions = pgTable('agent_definitions', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const agentSettings = pgTable('agent_settings', {
-  id: uuid('id').primaryKey().default(sql`uuidv7()`),
-  userId: uuid('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  agentId: text('agent_id').notNull(),
-  enabled: boolean('enabled').notNull().default(true),
-  settingsJson: jsonb('settings_json').notNull().default(sql`'{}'::jsonb`),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const agentSettings = pgTable(
+  'agent_settings',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    agentId: text('agent_id').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    settingsJson: jsonb('settings_json').notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('agent_settings_user_id_agent_id_unique').on(table.userId, table.agentId),
+  ],
+);
 
 export const agentJobs = pgTable(
   'agent_jobs',
@@ -290,6 +297,40 @@ export const jobEmailAnalyses = pgTable(
   ],
 );
 
+export const jobEmailDrafts = pgTable(
+  'job_email_drafts',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    googleConnectionId: uuid('google_connection_id')
+      .notNull()
+      .references(() => connections.id, { onDelete: 'cascade' }),
+    gmailMessageId: text('gmail_message_id').notNull(),
+    gmailThreadId: text('gmail_thread_id').notNull(),
+    jobId: uuid('job_id')
+      .notNull()
+      .references(() => agentJobs.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('creating'),
+    idempotencyKey: text('idempotency_key').notNull(),
+    gmailDraftId: text('gmail_draft_id'),
+    gmailDraftMessageId: text('gmail_draft_message_id'),
+    replyBodyHash: text('reply_body_hash'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex('job_email_drafts_connection_message_unique').on(
+      table.googleConnectionId,
+      table.gmailMessageId,
+    ),
+    uniqueIndex('job_email_drafts_idempotency_key_unique').on(table.idempotencyKey),
+    uniqueIndex('job_email_drafts_gmail_draft_id_unique').on(table.gmailDraftId),
+    check('job_email_drafts_status_check', sql`${table.status} IN ('creating', 'completed')`),
+  ],
+);
+
 export const usersRelations = relations(users, ({ many }) => ({
   connections: many(connections),
 }));
@@ -300,6 +341,7 @@ export const connectionsRelations = relations(connections, ({ one, many }) => ({
     references: [users.id],
   }),
   jobEmailAnalyses: many(jobEmailAnalyses),
+  jobEmailDrafts: many(jobEmailDrafts),
 }));
 
 export const agentJobsRelations = relations(agentJobs, ({ many }) => ({
@@ -315,6 +357,7 @@ export const agentRunsRelations = relations(agentRuns, ({ one, many }) => ({
   llmInvocations: many(llmInvocations),
   jobEmailAnalyses: many(jobEmailAnalyses),
   reviewRequests: many(reviewRequests),
+  jobEmailDrafts: many(jobEmailDrafts),
 }));
 
 export const agentRunStepsRelations = relations(agentRunSteps, ({ one }) => ({
@@ -340,6 +383,14 @@ export const jobEmailAnalysesRelations = relations(jobEmailAnalyses, ({ one }) =
     fields: [jobEmailAnalyses.runId],
     references: [agentRuns.id],
   }),
+}));
+
+export const jobEmailDraftsRelations = relations(jobEmailDrafts, ({ one }) => ({
+  connection: one(connections, {
+    fields: [jobEmailDrafts.googleConnectionId],
+    references: [connections.id],
+  }),
+  run: one(agentRuns, { fields: [jobEmailDrafts.runId], references: [agentRuns.id] }),
 }));
 
 export const reviewRequestsRelations = relations(reviewRequests, ({ one }) => ({

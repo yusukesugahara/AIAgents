@@ -28,11 +28,22 @@ describe('Job Search Email runtime configuration', () => {
     expect(() => loadJobEmailAnalysisRuntimeConfig({ OPENAI_API_KEY: 'test-key' })).toThrow(
       'OPENAI_ANALYSIS_MODEL is required',
     );
-    expect(
+    expect(() =>
       loadJobEmailAnalysisRuntimeConfig({
         OPENAI_API_KEY: 'test-key',
         OPENAI_ANALYSIS_MODEL: 'test-model',
       }),
-    ).toEqual({ openAiApiKey: 'test-key', openAiModel: 'test-model' });
+    ).toThrow('OPENAI_REPLY_MODEL is required');
+    expect(
+      loadJobEmailAnalysisRuntimeConfig({
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_ANALYSIS_MODEL: 'test-model',
+        OPENAI_REPLY_MODEL: 'test-reply-model',
+      }),
+    ).toEqual({
+      openAiApiKey: 'test-key',
+      openAiModel: 'test-model',
+      openAiReplyModel: 'test-reply-model',
+    });
   });
 });

@@ -54,6 +54,8 @@ export function createDatabaseConnection(
           AND to_regclass('public.agent_errors') IS NOT NULL
           AND to_regclass('public.llm_invocations') IS NOT NULL
           AND to_regclass('public.job_email_analyses') IS NOT NULL
+          AND to_regclass('public.job_email_drafts') IS NOT NULL
+          AND to_regclass('public.agent_settings_user_id_agent_id_unique') IS NOT NULL
           AND to_regclass('public.review_requests_run_id_unique') IS NOT NULL
           AND to_regclass('public.oauth_authorization_states') IS NOT NULL
           AND to_regclass('public.agent_jobs_agent_id_idempotency_key_unique') IS NOT NULL
@@ -72,6 +74,14 @@ export function createDatabaseConnection(
             WHERE table_schema = 'public'
               AND table_name = 'oauth_authorization_states'
               AND column_name = 'browser_nonce_hash'
+              AND is_nullable = 'NO'
+          )
+          AND EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'oauth_authorization_states'
+              AND column_name = 'authorization_purpose'
               AND is_nullable = 'NO'
           )
           AND EXISTS (
