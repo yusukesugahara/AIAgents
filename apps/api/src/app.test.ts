@@ -4,6 +4,7 @@ import type {
   AgentJob,
   AgentRun,
   AgentRunRepository,
+  AgentRunStep,
   ClaimNextJobInput,
   CompleteJobInput,
   EnqueueJobInput,
@@ -88,6 +89,7 @@ class FakeJobQueue implements JobQueue {
 
 class FakeRunRepository implements Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> {
   readonly runs = new Map<string, AgentRun>();
+  readonly steps = new Map<string, readonly AgentRunStep[]>();
 
   async getRun(id: string): Promise<AgentRun | null> {
     return this.runs.get(id) ?? null;
@@ -100,12 +102,18 @@ class FakeRunRepository implements Pick<AgentRunRepository, 'getLatestRunForJob'
         .sort((left, right) => right.startedAt.getTime() - left.startedAt.getTime())[0] ?? null
     );
   }
+
+  async getSteps(id: string): Promise<readonly AgentRunStep[]> {
+    return this.steps.get(id) ?? [];
+  }
 }
 
 function createConfiguredApp(
   options: {
     queue?: JobQueue;
-    runs?: Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'>;
+    runs?: Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> & {
+      getSteps?(runId: string): Promise<readonly AgentRunStep[]>;
+    };
   } = {},
 ) {
   return createApp({
@@ -467,7 +475,7 @@ describe('API app', () => {
     expect(queue.enqueued).toHaveLength(0);
   });
 
-  test('returns Job and Run metadata without input or output data', async () => {
+  test('returns Job metadata and keeps non-Job-Search Run output private', async () => {
     const queue = new FakeJobQueue();
     queue.jobs.set(jobId, createJob({ status: 'completed', attempts: 1, completedAt: now }));
     const runs = new FakeRunRepository();
@@ -497,6 +505,18 @@ describe('API app', () => {
         completedAt: '2026-07-19T00:00:00.000Z',
         errorCode: null,
         hasError: false,
+        latestRun: {
+          agentId: 'echo',
+          completedAt: '2026-07-19T00:00:00.000Z',
+          errorCode: null,
+          id: runId,
+          jobId,
+          output: null,
+          startedAt: '2026-07-19T00:00:00.000Z',
+          status: 'completed',
+          steps: [],
+          triggerType: 'queue',
+        },
         latestRunId: runId,
       },
     });
@@ -510,8 +530,109 @@ describe('API app', () => {
         errorCode: null,
         startedAt: '2026-07-19T00:00:00.000Z',
         completedAt: '2026-07-19T00:00:00.000Z',
+        output: null,
+        steps: [],
       },
     });
+  });
+
+  test('returns safe Job Search Email Run output and step state without stored inputs', async () => {
+    const queue = new FakeJobQueue();
+    queue.jobs.set(jobId, createJob({ agentId: 'job-search-email', status: 'completed' }));
+    const runs = new FakeRunRepository();
+    runs.runs.set(runId, {
+      agentId: 'job-search-email',
+      completedAt: now,
+      errorCode: null,
+      id: runId,
+      jobId,
+      output: {
+        analysis: { evidence: ['private email excerpt'] },
+        calendarEventId: 'calendar-event-1',
+        draftId: 'draft-1',
+        result: 'completed',
+      },
+      startedAt: now,
+      status: 'completed',
+      triggerType: 'manual',
+    });
+    runs.steps.set(runId, [
+      {
+        completedAt: now,
+        errorCode: null,
+        id: '0198be1d-a3a9-7d34-9bc3-123456789abe',
+        input: { body: 'private Gmail content' },
+        output: { draftId: 'draft-1', recipient: 'private@example.com' },
+        runId,
+        sequence: 50,
+        startedAt: now,
+        status: 'succeeded',
+        stepName: 'CREATE_DRAFT',
+      },
+      {
+        completedAt: now,
+        errorCode: 'RATE_LIMITED',
+        id: '0198be1d-a3a9-7d34-9bc3-123456789abf',
+        input: { prompt: 'private prompt' },
+        output: {
+          draftId: { secret: 'private nested detail' },
+          providerDetail: 'private detail',
+          retryable: true,
+        },
+        runId,
+        sequence: 20,
+        startedAt: now,
+        status: 'failed',
+        stepName: 'ANALYZE_EMAIL',
+      },
+    ]);
+    const app = createConfiguredApp({ queue, runs });
+    const response = await app.request(`/runs/${runId}`);
+    const body = await response.json();
+
+    expect(body).toMatchObject({
+      run: {
+        output: {
+          calendarEventId: 'calendar-event-1',
+          draftId: 'draft-1',
+          result: 'completed',
+        },
+        steps: [
+          {
+            errorCode: 'RATE_LIMITED',
+            output: { retryable: true },
+            sequence: 20,
+            status: 'failed',
+            stepName: 'ANALYZE_EMAIL',
+          },
+          {
+            errorCode: null,
+            output: { draftId: 'draft-1' },
+            sequence: 50,
+            status: 'succeeded',
+            stepName: 'CREATE_DRAFT',
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain('private');
+
+    const jobResponse = await app.request(`/jobs/${jobId}`);
+    const jobBody = await jobResponse.json();
+    expect(jobBody).toMatchObject({
+      job: {
+        latestRun: {
+          output: {
+            calendarEventId: 'calendar-event-1',
+            draftId: 'draft-1',
+            result: 'completed',
+          },
+          steps: body.run.steps,
+        },
+        latestRunId: runId,
+      },
+    });
+    expect(JSON.stringify(jobBody)).not.toContain('private');
   });
 
   test('exposes a Job error code without exposing its error message', async () => {

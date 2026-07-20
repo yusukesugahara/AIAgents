@@ -47,6 +47,45 @@ export interface AgentRun {
   readonly errorCode: string | null;
   readonly startedAt: Date;
   readonly completedAt: Date | null;
+  readonly output?: unknown | null;
+}
+
+export type AgentRunStepStatus = 'pending' | 'succeeded' | 'failed';
+
+export interface AgentRunStep {
+  readonly id: string;
+  readonly runId: string;
+  readonly sequence: number;
+  readonly stepName: string;
+  readonly status: AgentRunStepStatus;
+  readonly input: unknown;
+  readonly output: unknown | null;
+  readonly errorCode: string | null;
+  readonly startedAt: Date;
+  readonly completedAt: Date | null;
+}
+
+export interface AgentRunStepStart {
+  readonly runId: string;
+  readonly sequence: number;
+  readonly stepName: string;
+  readonly input: unknown;
+  readonly startedAt: Date;
+}
+
+export interface AgentRunStepCompletion {
+  readonly runId: string;
+  readonly stepName: string;
+  readonly output: unknown;
+  readonly completedAt: Date;
+}
+
+export interface AgentRunStepFailure {
+  readonly runId: string;
+  readonly stepName: string;
+  readonly errorCode: string;
+  readonly retryable: boolean;
+  readonly completedAt: Date;
 }
 
 export interface AgentRunRepository {
@@ -55,4 +94,11 @@ export interface AgentRunRepository {
   failRun(run: AgentRunFailure): Promise<void>;
   getLatestRunForJob(jobId: string): Promise<AgentRun | null>;
   getRun(runId: string): Promise<AgentRun | null>;
+}
+
+export interface AgentRunStepRepository {
+  startStep(step: AgentRunStepStart): Promise<void>;
+  completeStep(step: AgentRunStepCompletion): Promise<void>;
+  failStep(step: AgentRunStepFailure): Promise<void>;
+  getSteps(runId: string): Promise<readonly AgentRunStep[]>;
 }

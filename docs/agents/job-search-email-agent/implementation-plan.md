@@ -954,10 +954,16 @@ POST /agents/job-search-email/runs
 
 ```json
 {
-  "googleConnectionId": "connection-id",
-  "gmailMessageId": "message-id"
+  "idempotencyKey": "manual-run-unique-key",
+  "input": {
+    "googleConnectionId": "connection-id",
+    "gmailMessageId": "message-id",
+    "gmailThreadId": "thread-id"
+  }
 }
 ```
+
+`idempotencyKey`は任意です。同じキーと同じ入力を再送した場合は既存Jobを返し、同じキーを異なる入力へ再利用した場合は`409`を返します。
 
 #### Step構成
 
@@ -965,10 +971,13 @@ POST /agents/job-search-email/runs
 FETCH_EMAIL_THREAD
 ANALYZE_EMAIL
 GENERATE_REPLY
+CHECK_CALENDAR_POLICY
 CREATE_DRAFT
 CREATE_CALENDAR_EVENT
 COMPLETE
 ```
+
+`CHECK_CALENDAR_POLICY`は予定の作成前に、設定・日時・Web会議URL・権限・競合を確認します。各Stepは明示的な連番で実行順を保持します。本文・プロンプト・アクセストークンは保存せず、message/thread ID、処理可否、分類、外部リソースID、`NEEDS_REVIEW`理由、失敗コード、再試行可否だけを保存・返却します。
 
 #### 受け入れ条件
 
@@ -979,6 +988,8 @@ COMPLETE
 - [ ] 成功時にCalendar event IDを確認できる。
 - [ ] 再実行しても外部リソースが重複しない。
 - [ ] Fake外部サービスによるE2E Testが通る。
+- [ ] `GET /jobs/:jobId`で最新Runの安全な出力とStep状態を確認できる。
+- [ ] `GET /runs/:runId`で安全なStep状態とdraft／Calendar event IDを確認できる。
 
 PR-12の完了時点を、手動実行可能なMVP完成とします。
 

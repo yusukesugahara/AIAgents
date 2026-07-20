@@ -27,6 +27,7 @@ import {
   type OpenAiStructuredClient,
   type OpenAiStructuredResponse,
 } from '@ai-agents/llm';
+import { createApp } from '../../api/src/app';
 import { startWorker, type WorkerHandle } from './worker';
 
 const integrationEnabled = process.env.INTEGRATION_TESTS === '1';
@@ -138,6 +139,28 @@ class FakeStructuredClient implements OpenAiStructuredClient {
       status: 'completed',
       usage: { input_tokens: 80, output_tokens: 5, total_tokens: 85 },
     },
+    {
+      model: 'fake-analysis-model',
+      output: [{ content: [{ parsed: completedAnalysis, type: 'output_text' }], type: 'message' }],
+      status: 'completed',
+      usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
+    },
+    {
+      model: 'fake-reply-model',
+      output: [
+        {
+          content: [
+            {
+              parsed: { body: 'ご連絡ありがとうございます。', confidence: 0.98, warnings: [] },
+              type: 'output_text',
+            },
+          ],
+          type: 'message',
+        },
+      ],
+      status: 'completed',
+      usage: { input_tokens: 80, output_tokens: 20, total_tokens: 100 },
+    },
   ];
 
   async parse(): Promise<OpenAiStructuredResponse> {
@@ -176,7 +199,7 @@ async function waitForCompletedJobs(queue: PostgresJobQueue, jobIds: readonly st
 }
 
 describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker integration', () => {
-  test('persists completed analysis, invocation metadata, and a refusal review', async () => {
+  test('runs API-to-Worker flows and preserves external idempotency across re-execution', async () => {
     const database = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
     const queue = new PostgresJobQueue(database);
     const runs = new PostgresAgentRunRepository(database);
@@ -235,6 +258,17 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
         replyModel: 'fake-reply-model',
         reviews,
         settings,
+        steps: runs,
+      });
+      const registry = createRuntimeAgentRegistry({
+        environment: 'test',
+        jobSearchEmailAgent,
+      });
+      const app = createApp({
+        logger: { error() {}, info() {} },
+        queue,
+        registry,
+        runs,
       });
       worker = await startWorker({
         database: {
@@ -245,41 +279,49 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
         pollIntervalMs: 5,
         queue,
         runner: new AgentRunner({
-          registry: createRuntimeAgentRegistry({
-            environment: 'test',
-            jobSearchEmailAgent,
-          }),
+          registry,
           repository: runs,
         }),
         workerId: 'job-email-integration-worker',
       });
 
-      for (const index of [1, 2]) {
-        const job = await queue.enqueue({
-          agentId: 'job-search-email',
-          idempotencyKey: `${idempotencyPrefix}-${index}`,
-          input: {
-            googleConnectionId: connectionId,
-            gmailMessageId: `message-${index}`,
-            gmailThreadId: `thread-${index}`,
-          },
-          triggerType: 'manual',
+      for (const [index, gmailMessageId] of [
+        [1, 'message-1'],
+        [2, 'message-2'],
+        [3, 'message-1'],
+      ] as const) {
+        const response = await app.request('/agents/job-search-email/runs', {
+          body: JSON.stringify({
+            idempotencyKey: `${idempotencyPrefix}-${index}`,
+            input: {
+              googleConnectionId: connectionId,
+              gmailMessageId,
+              gmailThreadId: gmailMessageId.replace('message-', 'thread-'),
+            },
+          }),
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
         });
-        jobIds.push(job.id);
+        expect(response.status).toBe(202);
+        const body = (await response.json()) as { jobId: string };
+        jobIds.push(body.jobId);
       }
       await waitForCompletedJobs(queue, jobIds);
 
       const completedRun = await runs.getLatestRunForJob(jobIds[0] as string);
       const reviewRun = await runs.getLatestRunForJob(jobIds[1] as string);
-      if (!completedRun || !reviewRun) throw new Error('Expected completed integration Runs');
+      const replayRun = await runs.getLatestRunForJob(jobIds[2] as string);
+      if (!completedRun || !reviewRun || !replayRun)
+        throw new Error('Expected completed integration Runs');
       expect(completedRun).toMatchObject({ status: 'completed' });
       expect(reviewRun).toMatchObject({ status: 'completed' });
+      expect(replayRun).toMatchObject({ status: 'completed' });
       expect(
         await analyses.getLatestByMessage({
           googleConnectionId: connectionId,
           gmailMessageId: 'message-1',
         }),
-      ).toMatchObject({ analysis: { category: 'meeting_confirmed' }, runId: completedRun.id });
+      ).toMatchObject({ analysis: { category: 'meeting_confirmed' }, runId: replayRun.id });
       expect(gmailDrafts.created).toEqual([
         expect.objectContaining({
           gmailThreadId: 'thread-1',
@@ -287,6 +329,69 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
           to: 'recruiter@example.com',
         }),
       ]);
+      expect(calendar.created).toHaveLength(1);
+      const completedRunResponse = await app.request(`/runs/${completedRun.id}`);
+      expect(completedRunResponse.status).toBe(200);
+      const completedRunBody = (await completedRunResponse.json()) as {
+        run: {
+          output: { calendarEventId: string | null; draftId: string | null; result: string } | null;
+          status: string;
+          steps: Array<{ errorCode: string | null; status: string; stepName: string }>;
+        };
+      };
+      expect(completedRunBody.run.status).toBe('completed');
+      expect(completedRunBody.run.output).toMatchObject({
+        draftId: 'worker-draft-1',
+        result: 'completed',
+      });
+      expect(completedRunBody.run.output?.calendarEventId).toMatch(/^aia[0-9a-f]{64}$/u);
+      expect(completedRunBody.run.steps).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ status: 'succeeded', stepName: 'CREATE_DRAFT' }),
+          expect.objectContaining({ status: 'succeeded', stepName: 'CREATE_CALENDAR_EVENT' }),
+        ]),
+      );
+      expect((await runs.getSteps(completedRun.id)).map((step) => step.stepName)).toEqual([
+        'FETCH_EMAIL_THREAD',
+        'ANALYZE_EMAIL',
+        'GENERATE_REPLY',
+        'CHECK_CALENDAR_POLICY',
+        'CREATE_DRAFT',
+        'CREATE_CALENDAR_EVENT',
+        'COMPLETE',
+      ]);
+      expect((await runs.getSteps(replayRun.id)).map((step) => step.stepName)).toEqual([
+        'FETCH_EMAIL_THREAD',
+        'ANALYZE_EMAIL',
+        'GENERATE_REPLY',
+        'CHECK_CALENDAR_POLICY',
+        'CREATE_DRAFT',
+        'CREATE_CALENDAR_EVENT',
+        'COMPLETE',
+      ]);
+      expect(await runs.getSteps(reviewRun.id)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ stepName: 'FETCH_EMAIL_THREAD', status: 'succeeded' }),
+          expect.objectContaining({ stepName: 'ANALYZE_EMAIL', status: 'succeeded' }),
+          expect.objectContaining({ stepName: 'COMPLETE', status: 'succeeded' }),
+        ]),
+      );
+      const reviewRunResponse = await app.request(`/runs/${reviewRun.id}`);
+      expect(reviewRunResponse.status).toBe(200);
+      expect(await reviewRunResponse.json()).toMatchObject({
+        run: {
+          output: { calendarEventId: null, draftId: null, result: 'needs_review' },
+          steps: [
+            expect.objectContaining({ stepName: 'FETCH_EMAIL_THREAD', status: 'succeeded' }),
+            expect.objectContaining({ stepName: 'ANALYZE_EMAIL', status: 'succeeded' }),
+            expect.objectContaining({
+              output: { result: 'needs_review', reviewReason: 'llm_refusal' },
+              stepName: 'COMPLETE',
+              status: 'succeeded',
+            }),
+          ],
+        },
+      });
 
       const countRows = (await database.client`
           SELECT
@@ -299,16 +404,22 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
             (SELECT COUNT(*)::int FROM review_requests
              WHERE run_id = ${reviewRun.id}::uuid AND reason = 'llm_refusal') AS review_count,
             (SELECT COUNT(*)::int FROM job_email_analyses
-             WHERE run_id = ${reviewRun.id}::uuid) AS refused_analysis_count
+             WHERE run_id = ${reviewRun.id}::uuid) AS refused_analysis_count,
+            (SELECT COUNT(*)::int FROM job_calendar_events
+             WHERE google_connection_id = ${connectionId}::uuid
+               AND gmail_message_id = 'message-1'
+               AND status = 'completed') AS calendar_count
         `) as Array<{
+        calendar_count: number;
         draft_count: number;
         invocation_count: number;
         refused_analysis_count: number;
         review_count: number;
       }>;
       expect(countRows[0]).toEqual({
+        calendar_count: 1,
         draft_count: 1,
-        invocation_count: 3,
+        invocation_count: 5,
         refused_analysis_count: 0,
         review_count: 1,
       });

@@ -1,3 +1,4 @@
+import type { AgentRunStepRepository } from '@ai-agents/agent-core';
 import type {
   CreatedGmailDraft,
   CreatedGoogleCalendarEvent,
@@ -137,4 +138,6 @@ export interface JobSearchEmailAgentDependencies {
   readonly replyModel: string;
   readonly reviews: JobEmailReviewRequestRepository;
   readonly settings: JobEmailSettingsRepository;
+  /** Optional execution tracing boundary. Tests and non-Worker callers may omit it. */
+  readonly steps?: AgentRunStepRepository;
 }

@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { type AgentContext, AgentDependencyError } from '@ai-agents/agent-core';
+import {
+  type AgentContext,
+  AgentDependencyError,
+  type AgentRunStepRepository,
+} from '@ai-agents/agent-core';
 import type {
   CreatedGmailDraft,
   CreatedGoogleCalendarEvent,
@@ -143,6 +147,28 @@ class FakeReviewRepository implements JobEmailReviewRequestRepository {
     input: Parameters<JobEmailReviewRequestRepository['createReviewRequest']>[0],
   ): Promise<void> {
     this.saved.push(input);
+  }
+}
+
+class FakeStepRepository implements AgentRunStepRepository {
+  readonly completed: Parameters<AgentRunStepRepository['completeStep']>[0][] = [];
+  readonly failed: Parameters<AgentRunStepRepository['failStep']>[0][] = [];
+  readonly started: Parameters<AgentRunStepRepository['startStep']>[0][] = [];
+
+  async completeStep(input: Parameters<AgentRunStepRepository['completeStep']>[0]): Promise<void> {
+    this.completed.push(input);
+  }
+
+  async failStep(input: Parameters<AgentRunStepRepository['failStep']>[0]): Promise<void> {
+    this.failed.push(input);
+  }
+
+  async getSteps(): Promise<[]> {
+    return [];
+  }
+
+  async startStep(input: Parameters<AgentRunStepRepository['startStep']>[0]): Promise<void> {
+    this.started.push(input);
   }
 }
 
@@ -384,7 +410,8 @@ describe('Job Search Email Agent', () => {
     for (const reason of ['refusal', 'invalid_output'] as const) {
       const dependencies = createDependencies();
       dependencies.llm = new FakeLlmProvider([{ metadata, reason, status: 'needs_review' }]);
-      const output = await createJobSearchEmailAgent(dependencies).run(context(), {
+      const steps = new FakeStepRepository();
+      const output = await createJobSearchEmailAgent({ ...dependencies, steps }).run(context(), {
         googleConnectionId: connectionId,
         gmailMessageId: 'message-1',
         gmailThreadId: 'thread-1',
@@ -399,6 +426,10 @@ describe('Job Search Email Agent', () => {
       expect(dependencies.reviews.saved[0]?.reason).toBe(
         reason === 'refusal' ? 'llm_refusal' : 'llm_invalid_output',
       );
+      expect(steps.completed.at(-1)?.output).toMatchObject({
+        result: 'needs_review',
+        reviewReason: reason === 'refusal' ? 'llm_refusal' : 'llm_invalid_output',
+      });
     }
   });
 
@@ -442,13 +473,22 @@ describe('Job Search Email Agent', () => {
     );
     const dependencies = createDependencies();
     dependencies.llm = new FakeLlmProvider([providerFailure]);
+    const steps = new FakeStepRepository();
     await expect(
-      createJobSearchEmailAgent(dependencies).run(context(), {
+      createJobSearchEmailAgent({ ...dependencies, steps }).run(context(), {
         googleConnectionId: connectionId,
         gmailMessageId: 'message-1',
         gmailThreadId: 'thread-1',
       }),
     ).rejects.toBe(providerFailure);
+    expect(steps.completed.map((step) => step.stepName)).toEqual(['FETCH_EMAIL_THREAD']);
+    expect(steps.failed).toEqual([
+      expect.objectContaining({
+        errorCode: 'RATE_LIMITED',
+        retryable: true,
+        stepName: 'ANALYZE_EMAIL',
+      }),
+    ]);
 
     const persistenceDependencies = createDependencies();
     persistenceDependencies.analyses.error = new Error('database secret details');
@@ -514,6 +554,61 @@ describe('Job Search Email Agent', () => {
     expect(dependencies.reviews.saved).toHaveLength(0);
   });
 
+  test('records safe, ordered execution steps for a complete manual flow', async () => {
+    const analysisResult = analysis({
+      category: 'meeting_confirmed',
+      meeting: {
+        endAt: '2026-07-21T11:00:00+09:00',
+        isConfirmed: true,
+        startAt: '2026-07-21T10:00:00+09:00',
+        timezone: 'Asia/Tokyo',
+        url: 'https://meet.example.com/interview',
+        urlType: 'web_meeting',
+      },
+      needsReply: true,
+      replyIntent: 'acknowledge',
+    });
+    const dependencies = createDependencies(analysisResult);
+    dependencies.llm = new FakeLlmProvider([
+      { data: analysisResult, metadata, status: 'completed' },
+      {
+        data: { body: 'ご連絡ありがとうございます。', confidence: 0.98, warnings: [] },
+        metadata,
+        status: 'completed',
+      },
+    ]);
+    const steps = new FakeStepRepository();
+    const output = await createJobSearchEmailAgent({ ...dependencies, steps }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toMatchObject({ result: 'completed' });
+    expect(steps.started.map((step) => step.stepName)).toEqual([
+      'FETCH_EMAIL_THREAD',
+      'ANALYZE_EMAIL',
+      'GENERATE_REPLY',
+      'CHECK_CALENDAR_POLICY',
+      'CREATE_DRAFT',
+      'CREATE_CALENDAR_EVENT',
+      'COMPLETE',
+    ]);
+    expect(steps.started.map((step) => step.sequence)).toEqual([10, 20, 30, 40, 50, 60, 70]);
+    expect(steps.completed).toHaveLength(7);
+    expect(steps.failed).toHaveLength(0);
+    expect(steps.completed.find((step) => step.stepName === 'ANALYZE_EMAIL')?.output).toEqual({
+      category: 'meeting_confirmed',
+      isJobRelated: true,
+      outcome: 'completed',
+    });
+    expect(steps.completed.at(-1)?.output).toEqual({
+      calendarEventId: output.calendarEventId,
+      draftId: output.draftId,
+      result: 'completed',
+    });
+  });
+
   test('creates one primary Calendar event for a confirmed Web meeting without a reply', async () => {
     const dependencies = createDependencies(
       analysis({
@@ -572,7 +667,8 @@ describe('Job Search Email Agent', () => {
       },
     ]);
     dependencies.calendar.hasConflict = true;
-    const agent = createJobSearchEmailAgent(dependencies);
+    const steps = new FakeStepRepository();
+    const agent = createJobSearchEmailAgent({ ...dependencies, steps });
 
     const output = await agent.run(context(), {
       googleConnectionId: connectionId,
@@ -584,6 +680,13 @@ describe('Job Search Email Agent', () => {
     expect(dependencies.reviews.saved[0]?.reason).toBe('calendar_conflict');
     expect(dependencies.gmailDrafts.created).toHaveLength(0);
     expect(dependencies.calendar.created).toHaveLength(0);
+    expect(
+      steps.completed.find((step) => step.stepName === 'CHECK_CALENDAR_POLICY')?.output,
+    ).toEqual({
+      applicable: false,
+      outcome: 'needs_review',
+      reviewReason: 'calendar_conflict',
+    });
   });
 
   test('stops both external writes when a confirmed meeting has no company name', async () => {

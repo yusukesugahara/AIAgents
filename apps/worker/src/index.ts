@@ -50,6 +50,7 @@ if (!database) {
 }
 
 const googleConnections = new PostgresGoogleConnectionRepository(database);
+const runs = new PostgresAgentRunRepository(database);
 const accessTokens = new GoogleAccessTokenService({
   cipher: AesGcmTokenCipher.fromBase64Key(googleAccessTokenConfig.tokenEncryptionKey),
   credentials: googleConnections,
@@ -70,6 +71,7 @@ const jobSearchEmailAgent = createJobSearchEmailAgent({
   replyModel: analysisRuntimeConfig.openAiReplyModel,
   reviews: new PostgresJobEmailReviewRequestRepository(database),
   settings: new PostgresJobEmailSettingsRepository(database),
+  steps: runs,
 });
 
 const worker = await startWorker({
@@ -83,7 +85,7 @@ const worker = await startWorker({
       environment: process.env.APP_ENV,
       jobSearchEmailAgent,
     }),
-    repository: new PostgresAgentRunRepository(database),
+    repository: runs,
   }),
 });
 

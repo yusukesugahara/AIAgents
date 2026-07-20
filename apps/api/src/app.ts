@@ -5,6 +5,8 @@ import {
   type AgentRegistry,
   type AgentRun,
   type AgentRunRepository,
+  type AgentRunStep,
+  type AgentRunStepRepository,
   IdempotencyConflictError,
   type JobQueue,
 } from '@ai-agents/agent-core';
@@ -39,7 +41,8 @@ export interface ApiAppOptions {
   queue?: JobQueue;
   registry?: AgentRegistry;
   requestIdGenerator?: () => string;
-  runs?: Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'>;
+  runs?: Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> &
+    Partial<Pick<AgentRunStepRepository, 'getSteps'>>;
 }
 
 class ApiError extends Error {
@@ -243,19 +246,23 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
       throw new ApiError('JOB_NOT_FOUND', 404, `Job "${jobId}" was not found`);
     }
 
-    const latestRun = await requireRunRepository(options).getLatestRunForJob(jobId);
-    return context.json({ job: toJobResponse(job, latestRun) });
+    const runs = requireRunRepository(options);
+    const latestRun = await runs.getLatestRunForJob(jobId);
+    const steps = latestRun && runs.getSteps ? await runs.getSteps(latestRun.id) : [];
+    return context.json({ job: toJobResponse(job, latestRun, steps) });
   });
 
   app.get('/runs/:runId', async (context) => {
     const runId = parseId(context.req.param('runId'));
-    const run = await requireRunRepository(options).getRun(runId);
+    const runs = requireRunRepository(options);
+    const run = await runs.getRun(runId);
 
     if (!run) {
       throw new ApiError('RUN_NOT_FOUND', 404, `Run "${runId}" was not found`);
     }
 
-    return context.json({ run: toRunResponse(run) });
+    const steps = runs.getSteps ? await runs.getSteps(runId) : [];
+    return context.json({ run: toRunResponse(run, steps) });
   });
 
   app.notFound((context) => errorResponse(context, 'NOT_FOUND', 404, 'Route was not found'));
@@ -327,7 +334,8 @@ function requireQueue(options: ApiAppOptions): JobQueue {
 
 function requireRunRepository(
   options: ApiAppOptions,
-): Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> {
+): Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> &
+  Partial<Pick<AgentRunStepRepository, 'getSteps'>> {
   if (!options.runs) {
     throw new ApiError('INTERNAL_ERROR', 500, 'Run Repository is not configured');
   }
@@ -374,7 +382,11 @@ function parseId(value: string): string {
   return parsed.data;
 }
 
-function toJobResponse(job: AgentJob, latestRun: AgentRun | null) {
+function toJobResponse(
+  job: AgentJob,
+  latestRun: AgentRun | null,
+  latestRunSteps: readonly AgentRunStep[] = [],
+) {
   return {
     agentId: job.agentId,
     attempts: job.attempts,
@@ -384,12 +396,13 @@ function toJobResponse(job: AgentJob, latestRun: AgentRun | null) {
     errorCode: job.lastErrorCode,
     hasError: job.lastErrorCode !== null || job.lastError !== null,
     id: job.id,
+    latestRun: latestRun ? toRunResponse(latestRun, latestRunSteps) : null,
     latestRunId: latestRun?.id ?? null,
     status: job.status,
   };
 }
 
-function toRunResponse(run: AgentRun) {
+function toRunResponse(run: AgentRun, steps: readonly AgentRunStep[] = []) {
   return {
     agentId: run.agentId,
     completedAt: run.completedAt ? toIsoString(run.completedAt) : null,
@@ -398,8 +411,88 @@ function toRunResponse(run: AgentRun) {
     jobId: run.jobId,
     startedAt: toIsoString(run.startedAt),
     status: run.status,
+    output: toJobSearchEmailOutput(run),
+    steps:
+      run.agentId === 'job-search-email'
+        ? [...steps].sort((left, right) => left.sequence - right.sequence).map(toStepResponse)
+        : [],
     triggerType: run.triggerType,
   };
+}
+
+function toJobSearchEmailOutput(run: AgentRun): {
+  readonly calendarEventId: string | null;
+  readonly draftId: string | null;
+  readonly result: string;
+} | null {
+  if (run.agentId !== 'job-search-email' || !run.output || typeof run.output !== 'object') {
+    return null;
+  }
+  const output = run.output as Record<string, unknown>;
+  const result = output.result;
+  const draftId = output.draftId;
+  const calendarEventId = output.calendarEventId;
+  if (
+    !isJobSearchEmailResult(result) ||
+    !isNullableBoundedString(draftId) ||
+    !isNullableBoundedString(calendarEventId)
+  ) {
+    return null;
+  }
+  return { calendarEventId, draftId, result };
+}
+
+function isJobSearchEmailResult(value: unknown): value is 'completed' | 'needs_review' | 'skipped' {
+  return value === 'completed' || value === 'needs_review' || value === 'skipped';
+}
+
+function isNullableBoundedString(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && value.length <= 1_024);
+}
+
+function toStepResponse(step: AgentRunStep) {
+  return {
+    completedAt: step.completedAt ? toIsoString(step.completedAt) : null,
+    errorCode: step.errorCode,
+    output: toSafeStepOutput(step.output),
+    sequence: step.sequence,
+    startedAt: toIsoString(step.startedAt),
+    status: step.status,
+    stepName: step.stepName,
+  };
+}
+
+function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const output = value as Record<string, unknown>;
+  const safeStringKeys = [
+    'calendarEventId',
+    'category',
+    'draftId',
+    'gmailMessageId',
+    'gmailThreadId',
+    'outcome',
+    'result',
+    'reviewReason',
+  ] as const;
+  const safeBooleanKeys = ['applicable', 'isJobRelated', 'retryable'] as const;
+  const safeOutput: Record<string, unknown> = {};
+  for (const key of safeStringKeys) {
+    const field = output[key];
+    if (typeof field === 'string' && field.length <= 1_024) safeOutput[key] = field;
+  }
+  for (const key of safeBooleanKeys) {
+    const field = output[key];
+    if (typeof field === 'boolean') safeOutput[key] = field;
+  }
+  if (
+    typeof output.messageCount === 'number' &&
+    Number.isSafeInteger(output.messageCount) &&
+    output.messageCount >= 0
+  ) {
+    safeOutput.messageCount = output.messageCount;
+  }
+  return safeOutput;
 }
 
 function toIsoString(value: Date | string): string {

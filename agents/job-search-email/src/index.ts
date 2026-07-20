@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AgentContext } from '@ai-agents/agent-core';
-import { AgentDependencyError, defineAgent } from '@ai-agents/agent-core';
+import { AgentDependencyError, defineAgent, RetryableJobError } from '@ai-agents/agent-core';
 import {
   type CreatedGmailDraft,
   type CreatedGoogleCalendarEvent,
@@ -37,6 +37,18 @@ export * from './ports';
 export * from './prompt';
 export * from './schemas';
 
+const jobEmailStepSequence = {
+  FETCH_EMAIL_THREAD: 10,
+  ANALYZE_EMAIL: 20,
+  GENERATE_REPLY: 30,
+  CHECK_CALENDAR_POLICY: 40,
+  CREATE_DRAFT: 50,
+  CREATE_CALENDAR_EVENT: 60,
+  COMPLETE: 70,
+} as const;
+
+type JobEmailStepName = keyof typeof jobEmailStepSequence;
+
 export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDependencies) {
   if (!dependencies.model.trim()) {
     throw new Error('OPENAI_ANALYSIS_MODEL is required');
@@ -50,62 +62,105 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
     inputSchema: jobSearchEmailInputSchema,
     outputSchema: jobSearchEmailOutputSchema,
     async run(context, input) {
-      const [message, thread] = await Promise.all([
-        dependencies.gmail.getMessage({
-          googleConnectionId: input.googleConnectionId,
-          gmailMessageId: input.gmailMessageId,
+      const { message, thread } = await trackStep(
+        dependencies,
+        context,
+        'FETCH_EMAIL_THREAD',
+        { gmailMessageId: input.gmailMessageId, gmailThreadId: input.gmailThreadId },
+        async () => {
+          const [message, thread] = await Promise.all([
+            dependencies.gmail.getMessage({
+              googleConnectionId: input.googleConnectionId,
+              gmailMessageId: input.gmailMessageId,
+            }),
+            dependencies.gmail.getThread({
+              googleConnectionId: input.googleConnectionId,
+              gmailThreadId: input.gmailThreadId,
+            }),
+          ]);
+          if (
+            message.id !== input.gmailMessageId ||
+            message.threadId !== input.gmailThreadId ||
+            thread.id !== input.gmailThreadId ||
+            !thread.messages.some((threadMessage) => threadMessage.id === input.gmailMessageId)
+          ) {
+            throw new AgentDependencyError(
+              'INVALID_RESPONSE',
+              false,
+              'Gmail returned inconsistent message and thread data',
+            );
+          }
+          return { message, thread };
+        },
+        ({ message, thread }) => ({
+          gmailMessageId: message.id,
+          gmailThreadId: thread.id,
+          messageCount: thread.messages.length,
         }),
-        dependencies.gmail.getThread({
-          googleConnectionId: input.googleConnectionId,
-          gmailThreadId: input.gmailThreadId,
-        }),
-      ]);
-
-      if (
-        message.id !== input.gmailMessageId ||
-        message.threadId !== input.gmailThreadId ||
-        thread.id !== input.gmailThreadId ||
-        !thread.messages.some((threadMessage) => threadMessage.id === input.gmailMessageId)
-      ) {
-        throw new AgentDependencyError(
-          'INVALID_RESPONSE',
-          false,
-          'Gmail returned inconsistent message and thread data',
-        );
-      }
-
-      const calendarSettings = await persistResult(
-        () => dependencies.settings.getCalendarSettings(input.googleConnectionId),
-        'Calendar settings could not be loaded',
       );
-      const analysisDefaultTimezone =
-        calendarSettings && isValidIanaTimeZone(calendarSettings.timezone)
-          ? calendarSettings.timezone
-          : jobEmailDefaultTimezone;
 
-      const llmResult = await dependencies.llm.generateStructured({
-        model: dependencies.model,
-        promptVersion: jobEmailAnalysisPromptVersion,
-        runId: context.runId,
-        schema: jobEmailAnalysisSchema,
-        schemaName: jobEmailAnalysisSchemaName,
-        schemaVersion: jobEmailAnalysisSchemaVersion,
-        signal: context.signal,
-        systemPrompt: jobEmailAnalysisSystemPrompt,
-        userInput: buildJobEmailAnalysisInput(thread, message, analysisDefaultTimezone),
-      });
+      const { calendarSettings, llmResult } = await trackStep(
+        dependencies,
+        context,
+        'ANALYZE_EMAIL',
+        { gmailMessageId: input.gmailMessageId, gmailThreadId: input.gmailThreadId },
+        async () => {
+          const calendarSettings = await persistResult(
+            () => dependencies.settings.getCalendarSettings(input.googleConnectionId),
+            'Calendar settings could not be loaded',
+          );
+          const analysisDefaultTimezone =
+            calendarSettings && isValidIanaTimeZone(calendarSettings.timezone)
+              ? calendarSettings.timezone
+              : jobEmailDefaultTimezone;
+          const llmResult = await dependencies.llm.generateStructured({
+            model: dependencies.model,
+            promptVersion: jobEmailAnalysisPromptVersion,
+            runId: context.runId,
+            schema: jobEmailAnalysisSchema,
+            schemaName: jobEmailAnalysisSchemaName,
+            schemaVersion: jobEmailAnalysisSchemaVersion,
+            signal: context.signal,
+            systemPrompt: jobEmailAnalysisSystemPrompt,
+            userInput: buildJobEmailAnalysisInput(thread, message, analysisDefaultTimezone),
+          });
+          return { calendarSettings, llmResult };
+        },
+        ({ llmResult }) => {
+          const parsedAnalysis =
+            llmResult.status === 'completed'
+              ? jobEmailAnalysisSchema.safeParse(llmResult.data)
+              : null;
+          return {
+            ...(parsedAnalysis?.success
+              ? {
+                  category: parsedAnalysis.data.category,
+                  isJobRelated: parsedAnalysis.data.isJobRelated,
+                }
+              : {}),
+            outcome: llmResult.status,
+          };
+        },
+      );
 
       if (llmResult.status === 'needs_review') {
-        return saveNeedsReview(
+        const output = await saveNeedsReview(
           dependencies,
           context,
+          llmResult.reason === 'refusal' ? 'llm_refusal' : 'llm_invalid_output',
+        );
+        return completeTrackedRun(
+          dependencies,
+          context,
+          output,
           llmResult.reason === 'refusal' ? 'llm_refusal' : 'llm_invalid_output',
         );
       }
 
       const validatedAnalysis = jobEmailAnalysisSchema.safeParse(llmResult.data);
       if (!validatedAnalysis.success) {
-        return saveNeedsReview(dependencies, context, 'llm_invalid_output');
+        const output = await saveNeedsReview(dependencies, context, 'llm_invalid_output');
+        return completeTrackedRun(dependencies, context, output, 'llm_invalid_output');
       }
       const analysis = validatedAnalysis.data;
 
@@ -123,24 +178,39 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
       );
 
       if (!analysis.isJobRelated) {
-        return { analysis, calendarEventId: null, draftId: null, result: 'skipped' as const };
+        return completeTrackedRun(dependencies, context, {
+          analysis,
+          calendarEventId: null,
+          draftId: null,
+          result: 'skipped' as const,
+        });
       }
 
-      const replyAction = await prepareReplyAction(
+      const replyAction = await trackStep(
         dependencies,
         context,
-        input,
-        analysis,
-        message,
-        thread,
+        'GENERATE_REPLY',
+        { gmailMessageId: input.gmailMessageId },
+        () => prepareReplyAction(dependencies, context, input, analysis, message, thread),
+        (action) => ({
+          applicable: action.kind === 'ready',
+          outcome: action.kind,
+          ...(action.kind === 'needs_review' ? { reviewReason: action.reason } : {}),
+        }),
       );
       // Keep the conflict check as close as possible to the external-write boundary because
       // reply generation can be comparatively slow.
-      const calendarAction = await prepareCalendarAction(
+      const calendarAction = await trackStep(
         dependencies,
-        input,
-        analysis,
-        calendarSettings,
+        context,
+        'CHECK_CALENDAR_POLICY',
+        { gmailMessageId: input.gmailMessageId },
+        () => prepareCalendarAction(dependencies, input, analysis, calendarSettings),
+        (action) => ({
+          applicable: action.kind === 'ready',
+          outcome: action.kind,
+          ...(action.kind === 'needs_review' ? { reviewReason: action.reason } : {}),
+        }),
       );
       const reviewReason =
         calendarAction.kind === 'needs_review'
@@ -148,17 +218,41 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
           : replyAction.kind === 'needs_review'
             ? replyAction.reason
             : null;
-      if (reviewReason) return saveNeedsReview(dependencies, context, reviewReason, analysis);
+      if (reviewReason) {
+        const output = await saveNeedsReview(dependencies, context, reviewReason, analysis);
+        return completeTrackedRun(dependencies, context, output, reviewReason);
+      }
 
       const draftId =
         replyAction.kind === 'ready'
-          ? await createDraft(dependencies, context, input, replyAction)
+          ? await trackStep(
+              dependencies,
+              context,
+              'CREATE_DRAFT',
+              { gmailMessageId: input.gmailMessageId },
+              () => createDraft(dependencies, context, input, replyAction),
+              (createdDraftId) => ({ applicable: true, draftId: createdDraftId }),
+            )
           : null;
       const calendarEventId =
         calendarAction.kind === 'ready'
-          ? await createCalendarEvent(dependencies, context, input, calendarAction)
+          ? await trackStep(
+              dependencies,
+              context,
+              'CREATE_CALENDAR_EVENT',
+              { gmailMessageId: input.gmailMessageId },
+              () => createCalendarEvent(dependencies, context, input, calendarAction),
+              (createdCalendarEventId) => ({
+                applicable: true,
+                calendarEventId: createdCalendarEventId,
+              }),
+            )
           : null;
-      return completed(analysis, draftId, calendarEventId);
+      return completeTrackedRun(
+        dependencies,
+        context,
+        completed(analysis, draftId, calendarEventId),
+      );
     },
   });
 }
@@ -582,4 +676,80 @@ async function persistResult<T>(operation: () => Promise<T>, message: string): P
     if (error instanceof AgentDependencyError) throw error;
     throw new AgentDependencyError('TEMPORARY_UNAVAILABLE', true, message, { cause: error });
   }
+}
+
+async function trackStep<T>(
+  dependencies: JobSearchEmailAgentDependencies,
+  context: AgentContext,
+  stepName: JobEmailStepName,
+  input: Record<string, unknown>,
+  operation: () => Promise<T>,
+  toOutput: (value: T) => Record<string, unknown>,
+): Promise<T> {
+  const steps = dependencies.steps;
+  if (!steps) return operation();
+  await persistSafely(
+    () =>
+      steps.startStep({
+        input,
+        runId: context.runId,
+        sequence: jobEmailStepSequence[stepName],
+        startedAt: new Date(),
+        stepName,
+      }),
+    'Agent Run step could not be started',
+  );
+  try {
+    const value = await operation();
+    await persistSafely(
+      () =>
+        steps.completeStep({
+          completedAt: new Date(),
+          output: toOutput(value),
+          runId: context.runId,
+          stepName,
+        }),
+      'Agent Run step could not be completed',
+    );
+    return value;
+  } catch (error) {
+    const errorCode = error instanceof AgentDependencyError ? error.code : 'STEP_EXECUTION_FAILED';
+    const retryable =
+      error instanceof RetryableJobError ||
+      (error instanceof AgentDependencyError && error.retryable);
+    await persistSafely(
+      () =>
+        steps.failStep({
+          completedAt: new Date(),
+          errorCode,
+          retryable,
+          runId: context.runId,
+          stepName,
+        }),
+      'Agent Run step failure could not be saved',
+    );
+    throw error;
+  }
+}
+
+async function completeTrackedRun(
+  dependencies: JobSearchEmailAgentDependencies,
+  context: AgentContext,
+  output: import('./schemas').JobSearchEmailOutput,
+  reviewReason?: JobEmailReviewReason,
+): Promise<import('./schemas').JobSearchEmailOutput> {
+  await trackStep(
+    dependencies,
+    context,
+    'COMPLETE',
+    {},
+    async () => output,
+    (result) => ({
+      calendarEventId: result.calendarEventId,
+      draftId: result.draftId,
+      ...(reviewReason ? { reviewReason } : {}),
+      result: result.result,
+    }),
+  );
+  return output;
 }

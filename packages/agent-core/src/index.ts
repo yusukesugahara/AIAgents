@@ -6,6 +6,12 @@ export type {
   AgentRunFailure,
   AgentRunRepository,
   AgentRunStart,
+  AgentRunStep,
+  AgentRunStepCompletion,
+  AgentRunStepFailure,
+  AgentRunStepRepository,
+  AgentRunStepStart,
+  AgentRunStepStatus,
 } from './agent.types';
 export type { AgentContext } from './agent-context';
 export { AgentRegistry } from './agent-registry';

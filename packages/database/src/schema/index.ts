@@ -146,20 +146,28 @@ export const agentRuns = pgTable(
   (table) => [index('agent_runs_job_id_started_at_idx').on(table.jobId, table.startedAt)],
 );
 
-export const agentRunSteps = pgTable('agent_run_steps', {
-  id: uuid('id').primaryKey().default(sql`uuidv7()`),
-  runId: uuid('run_id')
-    .notNull()
-    .references(() => agentRuns.id, { onDelete: 'cascade' }),
-  stepName: text('step_name').notNull(),
-  status: stepStatus('status').notNull().default('pending'),
-  inputJson: jsonb('input_json').notNull(),
-  outputJson: jsonb('output_json'),
-  errorCode: text('error_code'),
-  errorMessage: text('error_message'),
-  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
-  completedAt: timestamp('completed_at', { withTimezone: true }),
-});
+export const agentRunSteps = pgTable(
+  'agent_run_steps',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: 'cascade' }),
+    sequence: integer('sequence').notNull(),
+    stepName: text('step_name').notNull(),
+    status: stepStatus('status').notNull().default('pending'),
+    inputJson: jsonb('input_json').notNull(),
+    outputJson: jsonb('output_json'),
+    errorCode: text('error_code'),
+    errorMessage: text('error_message'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex('agent_run_steps_run_id_sequence_unique').on(table.runId, table.sequence),
+    uniqueIndex('agent_run_steps_run_id_step_name_unique').on(table.runId, table.stepName),
+  ],
+);
 
 export const llmInvocations = pgTable(
   'llm_invocations',

@@ -6,6 +6,11 @@ import type {
   AgentRunFailure,
   AgentRunRepository,
   AgentRunStart,
+  AgentRunStep,
+  AgentRunStepCompletion,
+  AgentRunStepFailure,
+  AgentRunStepRepository,
+  AgentRunStepStart,
   ClaimNextJobInput,
   CompleteJobInput,
   EnqueueJobInput,
@@ -45,6 +50,20 @@ interface AgentRunRow {
   agent_id: string;
   status: AgentRun['status'];
   trigger_type: string;
+  error_code: string | null;
+  output_json: unknown | null;
+  started_at: Date | string;
+  completed_at: Date | string | null;
+}
+
+interface AgentRunStepRow {
+  id: string;
+  run_id: string;
+  sequence: number;
+  step_name: string;
+  status: AgentRunStep['status'];
+  input_json: unknown;
+  output_json: unknown | null;
   error_code: string | null;
   started_at: Date | string;
   completed_at: Date | string | null;
@@ -324,7 +343,7 @@ export class PostgresJobQueue implements JobQueue {
   }
 }
 
-export class PostgresAgentRunRepository implements AgentRunRepository {
+export class PostgresAgentRunRepository implements AgentRunRepository, AgentRunStepRepository {
   constructor(private readonly database: Pick<DatabaseConnection, 'client'>) {}
 
   async startRun(run: AgentRunStart): Promise<void> {
@@ -386,6 +405,7 @@ export class PostgresAgentRunRepository implements AgentRunRepository {
         runs.status,
         runs.trigger_type,
         errors.code AS error_code,
+        runs.output_json,
         runs.started_at,
         runs.completed_at
       FROM agent_runs AS runs
@@ -411,6 +431,7 @@ export class PostgresAgentRunRepository implements AgentRunRepository {
         runs.status,
         runs.trigger_type,
         errors.code AS error_code,
+        runs.output_json,
         runs.started_at,
         runs.completed_at
       FROM agent_runs AS runs
@@ -427,6 +448,58 @@ export class PostgresAgentRunRepository implements AgentRunRepository {
     `) as AgentRunRow[];
 
     return run ? toAgentRun(run) : null;
+  }
+
+  async startStep(step: AgentRunStepStart): Promise<void> {
+    await this.database.client`
+      INSERT INTO agent_run_steps (run_id, sequence, step_name, status, input_json, started_at)
+      VALUES (
+        ${step.runId}::uuid, ${step.sequence}, ${step.stepName}, 'pending',
+        ${JSON.stringify(step.input)}::jsonb, ${toTimestamp(step.startedAt)}
+      )
+    `;
+  }
+
+  async completeStep(step: AgentRunStepCompletion): Promise<void> {
+    const [completed] = await this.database.client`
+      UPDATE agent_run_steps
+      SET status = 'succeeded', output_json = ${JSON.stringify(step.output)}::jsonb,
+          completed_at = ${toTimestamp(step.completedAt)}
+      WHERE run_id = ${step.runId}::uuid
+        AND step_name = ${step.stepName}
+        AND status = 'pending'
+      RETURNING id
+    `;
+    if (!completed) {
+      throw new Error(`Agent Run step "${step.stepName}" is not pending and cannot be completed`);
+    }
+  }
+
+  async failStep(step: AgentRunStepFailure): Promise<void> {
+    const [failed] = await this.database.client`
+      UPDATE agent_run_steps
+      SET status = 'failed', error_code = ${step.errorCode},
+          output_json = ${JSON.stringify({ retryable: step.retryable })}::jsonb,
+          completed_at = ${toTimestamp(step.completedAt)}
+      WHERE run_id = ${step.runId}::uuid
+        AND step_name = ${step.stepName}
+        AND status = 'pending'
+      RETURNING id
+    `;
+    if (!failed) {
+      throw new Error(`Agent Run step "${step.stepName}" is not pending and cannot be failed`);
+    }
+  }
+
+  async getSteps(runId: string): Promise<readonly AgentRunStep[]> {
+    const steps = (await this.database.client`
+      SELECT id, run_id, sequence, step_name, status, input_json, output_json, error_code,
+             started_at, completed_at
+      FROM agent_run_steps
+      WHERE run_id = ${runId}::uuid
+      ORDER BY sequence, id
+    `) as AgentRunStepRow[];
+    return steps.map(toAgentRunStep);
   }
 }
 
@@ -469,6 +542,22 @@ function toAgentRun(row: AgentRunRow): AgentRun {
     agentId: row.agent_id,
     status: row.status,
     triggerType: row.trigger_type,
+    errorCode: row.error_code,
+    output: row.output_json,
+    startedAt: toDate(row.started_at),
+    completedAt: row.completed_at ? toDate(row.completed_at) : null,
+  };
+}
+
+function toAgentRunStep(row: AgentRunStepRow): AgentRunStep {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    sequence: row.sequence,
+    stepName: row.step_name,
+    status: row.status,
+    input: row.input_json,
+    output: row.output_json,
     errorCode: row.error_code,
     startedAt: toDate(row.started_at),
     completedAt: row.completed_at ? toDate(row.completed_at) : null,

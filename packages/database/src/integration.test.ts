@@ -126,6 +126,8 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         await applyMigrationFile(temporary, '0009_stiff_nuke.sql');
         expect(await temporary.isSchemaReady()).toBe(false);
         await applyMigrationFile(temporary, '0010_slow_wonder_man.sql');
+        expect(await temporary.isSchemaReady()).toBe(false);
+        await applyMigrationFile(temporary, '0011_careless_rhodey.sql');
         expect(await temporary.isSchemaReady()).toBe(true);
         const settings = (await temporary.client`
           SELECT settings_json
@@ -675,8 +677,51 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         expect(await repository.getRun(completedRunId)).toMatchObject({
           id: completedRunId,
           jobId: job.id,
+          output: { result: 'ok' },
           status: 'completed',
         });
+        await repository.startStep({
+          input: { gmailMessageId: 'message-1' },
+          runId: completedRunId,
+          sequence: 10,
+          startedAt: now,
+          stepName: 'FETCH_EMAIL_THREAD',
+        });
+        await repository.completeStep({
+          completedAt: now,
+          output: { messageCount: 1 },
+          runId: completedRunId,
+          stepName: 'FETCH_EMAIL_THREAD',
+        });
+        await repository.startStep({
+          input: { gmailMessageId: 'message-1' },
+          runId: completedRunId,
+          sequence: 20,
+          startedAt: now,
+          stepName: 'ANALYZE_EMAIL',
+        });
+        await repository.failStep({
+          completedAt: now,
+          errorCode: 'RATE_LIMITED',
+          retryable: true,
+          runId: completedRunId,
+          stepName: 'ANALYZE_EMAIL',
+        });
+        expect(await repository.getSteps(completedRunId)).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              output: { messageCount: 1 },
+              status: 'succeeded',
+              stepName: 'FETCH_EMAIL_THREAD',
+            }),
+            expect.objectContaining({
+              errorCode: 'RATE_LIMITED',
+              output: { retryable: true },
+              status: 'failed',
+              stepName: 'ANALYZE_EMAIL',
+            }),
+          ]),
+        );
 
         await repository.startRun({
           runId: failedRunId,
