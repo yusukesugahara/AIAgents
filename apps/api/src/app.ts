@@ -3,12 +3,10 @@ import { GoogleOAuthError } from '@ai-agents/google-oauth';
 import { Hono } from 'hono';
 import { type ApiAppOptions, type ApiEnvironment, ApiError, type ApiLogger } from './api-types';
 import { errorResponse, hasValidBearerToken, isPublicPath, oauthErrorMessage } from './http';
-import {
-  registerAgentRoutes,
-  registerHealthRoutes,
-  registerOAuthRoutes,
-  registerRunRoutes,
-} from './routes';
+import { registerAgentRoutes } from './routes/agents';
+import { registerHealthRoutes } from './routes/health';
+import { registerOAuthRoutes } from './routes/oauth';
+import { registerRunRoutes } from './routes/runs';
 
 export type { ApiAppOptions, ApiLogger } from './api-types';
 
