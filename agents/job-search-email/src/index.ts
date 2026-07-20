@@ -15,6 +15,8 @@ import {
 import { createDraft, prepareReplyAction } from './reply-action';
 import { completeTrackedRun, trackStep } from './run-step-tracker';
 import {
+  type JobEmailAnalysis,
+  type JobSearchEmailOutput,
   jobEmailAnalysisSchema,
   jobSearchEmailInputSchema,
   jobSearchEmailOutputSchema,
@@ -251,13 +253,8 @@ async function saveNeedsReview(
   dependencies: JobSearchEmailAgentDependencies,
   context: AgentContext,
   reason: JobEmailReviewReason,
-  analysis: import('./schemas').JobEmailAnalysis | null = null,
-): Promise<{
-  analysis: import('./schemas').JobEmailAnalysis | null;
-  calendarEventId: null;
-  draftId: null;
-  result: 'needs_review';
-}> {
+  analysis: JobEmailAnalysis | null = null,
+): Promise<JobSearchEmailOutput> {
   await persistSafely(
     () =>
       dependencies.reviews.createReviewRequest({
@@ -277,10 +274,10 @@ async function saveNeedsReview(
 }
 
 function completed(
-  analysis: import('./schemas').JobEmailAnalysis,
+  analysis: JobEmailAnalysis,
   draftId: string | null = null,
   calendarEventId: string | null = null,
-) {
+): JobSearchEmailOutput {
   return {
     analysis,
     calendarEventId,

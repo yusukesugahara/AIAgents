@@ -27,7 +27,8 @@ export function hasValidBearerToken(
 
 export function isPublicPath(pathname: string): boolean {
   return (
-    pathname.startsWith('/health/') ||
+    pathname === '/health/live' ||
+    pathname === '/health/ready' ||
     pathname === '/auth/google' ||
     pathname === '/auth/google/compose' ||
     pathname === '/auth/google/calendar' ||
