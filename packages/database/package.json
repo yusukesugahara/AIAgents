@@ -16,7 +16,8 @@
     "@ai-agents/job-search-email": "workspace:*",
     "@ai-agents/llm": "workspace:*",
     "drizzle-orm": "^0.44.4",
-    "postgres": "^3.4.7"
+    "postgres": "^3.4.7",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "drizzle-kit": "^0.31.4"
