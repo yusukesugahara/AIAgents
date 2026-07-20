@@ -914,6 +914,7 @@ AND 信頼度0.9以上
 
 #### 実装内容
 
+- `GET /auth/google/calendar` によるCalendar専用の追加OAuth認可（`calendar.events`）
 - Calendar Port
 - `events.insert`
 - 決定的イベントID
@@ -924,6 +925,8 @@ AND 信頼度0.9以上
 - 重複防止
 - 既存予定との競合確認
 - 作成履歴保存
+
+返信下書きとCalendar登録は外部書き込み前に両方のPolicyを評価します。いずれかが要確認の場合は、両方の外部書き込みを停止します。
 
 #### 受け入れ条件
 

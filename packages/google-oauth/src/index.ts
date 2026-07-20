@@ -15,7 +15,8 @@ export const googleOAuthScopes = [
 
 export const gmailReadonlyScope = 'https://www.googleapis.com/auth/gmail.readonly';
 export const gmailComposeScope = 'https://www.googleapis.com/auth/gmail.compose';
-export type GoogleOAuthPurpose = 'gmail_read' | 'gmail_compose';
+export const calendarEventsScope = 'https://www.googleapis.com/auth/calendar.events';
+export type GoogleOAuthPurpose = 'gmail_read' | 'gmail_compose' | 'calendar_events';
 
 const authorizationEndpoint = 'https://accounts.google.com/o/oauth2/v2/auth';
 const tokenEndpoint = 'https://oauth2.googleapis.com/token';
@@ -776,9 +777,14 @@ function isValidEmail(value: string): boolean {
 }
 
 function scopesForPurpose(purpose: GoogleOAuthPurpose): readonly string[] {
-  return purpose === 'gmail_compose'
-    ? [...googleOAuthScopes, gmailComposeScope]
-    : googleOAuthScopes;
+  switch (purpose) {
+    case 'gmail_compose':
+      return [...googleOAuthScopes, gmailComposeScope];
+    case 'calendar_events':
+      return [...googleOAuthScopes, calendarEventsScope];
+    default:
+      return googleOAuthScopes;
+  }
 }
 
 function isUuid(value: string): boolean {

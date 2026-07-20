@@ -55,6 +55,7 @@ export function createDatabaseConnection(
           AND to_regclass('public.llm_invocations') IS NOT NULL
           AND to_regclass('public.job_email_analyses') IS NOT NULL
           AND to_regclass('public.job_email_drafts') IS NOT NULL
+          AND to_regclass('public.job_calendar_events') IS NOT NULL
           AND to_regclass('public.agent_settings_user_id_agent_id_unique') IS NOT NULL
           AND to_regclass('public.review_requests_run_id_unique') IS NOT NULL
           AND to_regclass('public.oauth_authorization_states') IS NOT NULL

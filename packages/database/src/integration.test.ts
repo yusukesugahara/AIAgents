@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { IdempotencyConflictError, RetryableJobError } from '@ai-agents/agent-core';
 import { AesGcmTokenCipher } from '@ai-agents/google-oauth';
+import {
+  jobEmailAnalysisPromptVersion,
+  jobEmailAnalysisSchemaVersion,
+} from '@ai-agents/job-search-email';
 
 import {
   createDatabaseConnection,
@@ -8,6 +12,7 @@ import {
   PostgresAgentRunRepository,
   PostgresGoogleConnectionRepository,
   PostgresJobEmailAnalysisRepository,
+  PostgresJobEmailCalendarEventRepository,
   PostgresJobEmailDraftRepository,
   PostgresJobEmailReviewRequestRepository,
   PostgresJobEmailSettingsRepository,
@@ -119,6 +124,8 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         `;
         expect(await temporary.isSchemaReady()).toBe(false);
         await applyMigrationFile(temporary, '0009_stiff_nuke.sql');
+        expect(await temporary.isSchemaReady()).toBe(false);
+        await applyMigrationFile(temporary, '0010_slow_wonder_man.sql');
         expect(await temporary.isSchemaReady()).toBe(true);
         const settings = (await temporary.client`
           SELECT settings_json
@@ -932,9 +939,9 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
             gmailThreadId: 'gmail-thread-1',
             metadata: {
               model: `test-model-${index}`,
-              promptVersion: '2026-07-19.v1',
+              promptVersion: jobEmailAnalysisPromptVersion,
               schemaName: 'job_email_analysis',
-              schemaVersion: '1',
+              schemaVersion: jobEmailAnalysisSchemaVersion,
             },
             runId,
           });
@@ -964,9 +971,9 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           gmailThreadId: 'gmail-thread-1',
           metadata: {
             model: 'test-model-1',
-            promptVersion: '2026-07-19.v1',
+            promptVersion: jobEmailAnalysisPromptVersion,
             schemaName: 'job_email_analysis',
-            schemaVersion: '1',
+            schemaVersion: jobEmailAnalysisSchemaVersion,
           },
           runId: runIdTwo,
         };
@@ -1025,6 +1032,7 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
       const queue = new PostgresJobQueue(connection);
       const runs = new PostgresAgentRunRepository(connection);
       const drafts = new PostgresJobEmailDraftRepository(connection);
+      const calendarEvents = new PostgresJobEmailCalendarEventRepository(connection);
       const settings = new PostgresJobEmailSettingsRepository(connection);
       const email = `draft-${crypto.randomUUID()}@example.com`;
       const idempotencyKey = `draft-${crypto.randomUUID()}`;
@@ -1117,6 +1125,29 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         ).rejects.toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
         expect(await drafts.reserve(reservationInput)).toEqual({
           draftId: 'gmail-draft-1',
+          status: 'completed',
+        });
+
+        const calendarReservationInput = {
+          ...reservationInput,
+          idempotencyKey: `calendar-event-${crypto.randomUUID()}`,
+        };
+        expect(await calendarEvents.reserve(calendarReservationInput)).toEqual({
+          eventId: null,
+          status: 'reserved',
+        });
+        const calendarCompletionInput = {
+          calendarEvent: {
+            eventId: 'aia0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+          },
+          idempotencyKey: calendarReservationInput.idempotencyKey,
+          jobId: job.id,
+          runId,
+        };
+        await calendarEvents.complete(calendarCompletionInput);
+        await calendarEvents.complete(calendarCompletionInput);
+        expect(await calendarEvents.reserve(calendarReservationInput)).toEqual({
+          eventId: calendarCompletionInput.calendarEvent.eventId,
           status: 'completed',
         });
 

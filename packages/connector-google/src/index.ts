@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto';
 import { AgentDependencyError } from '@ai-agents/agent-core';
-import { type GoogleAccessTokenProvider, gmailComposeScope } from '@ai-agents/google-oauth';
+import {
+  calendarEventsScope,
+  type GoogleAccessTokenProvider,
+  gmailComposeScope,
+} from '@ai-agents/google-oauth';
 import { z } from 'zod';
 
 const gmailApiBaseUrl = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const calendarApiBaseUrl = 'https://www.googleapis.com/calendar/v3/calendars/primary';
 const defaultQuery = 'in:inbox newer_than:1d';
 
 export interface GmailMessageReference {
@@ -66,6 +71,39 @@ export interface GmailDraftWriter {
   findReplyDraft(input: FindReplyDraftInput): Promise<CreatedGmailDraft | null>;
 }
 
+export interface GoogleCalendarEvent {
+  readonly eventId: string;
+}
+
+export interface CreatedGoogleCalendarEvent extends GoogleCalendarEvent {}
+
+export interface GoogleCalendarClient {
+  createEvent(input: CreateGoogleCalendarEventInput): Promise<CreatedGoogleCalendarEvent>;
+  findConflictingEvents(input: FindCalendarConflictsInput): Promise<readonly GoogleCalendarEvent[]>;
+  findEvent(input: FindGoogleCalendarEventInput): Promise<GoogleCalendarEvent | null>;
+}
+
+export interface FindCalendarConflictsInput {
+  readonly endAt: string;
+  readonly googleConnectionId: string;
+  readonly startAt: string;
+}
+
+export interface FindGoogleCalendarEventInput {
+  readonly eventId: string;
+  readonly googleConnectionId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface CreateGoogleCalendarEventInput extends FindGoogleCalendarEventInput {
+  readonly description: string;
+  readonly endAt: string;
+  readonly location: string;
+  readonly startAt: string;
+  readonly summary: string;
+  readonly timeZone: string;
+}
+
 export interface CreateReplyDraftInput extends FindReplyDraftInput {
   readonly body: string;
   readonly from: string;
@@ -89,6 +127,12 @@ export interface HttpGmailReaderOptions {
 }
 
 export interface HttpGmailDraftWriterOptions {
+  readonly accessTokens: GoogleAccessTokenProvider;
+  readonly fetchImplementation?: FetchImplementation;
+  readonly timeoutMs?: number;
+}
+
+export interface HttpGoogleCalendarClientOptions {
   readonly accessTokens: GoogleAccessTokenProvider;
   readonly fetchImplementation?: FetchImplementation;
   readonly timeoutMs?: number;
@@ -140,6 +184,18 @@ const draftSchema = z
   .passthrough();
 const draftListSchema = z
   .object({ drafts: z.array(draftSchema).optional(), nextPageToken: z.string().optional() })
+  .passthrough();
+const calendarEventSchema = z
+  .object({
+    extendedProperties: z
+      .object({ private: z.record(z.string(), z.string()).optional() })
+      .optional(),
+    id: z.string().min(1),
+    transparency: z.enum(['opaque', 'transparent']).optional(),
+  })
+  .passthrough();
+const calendarEventListSchema = z
+  .object({ items: z.array(calendarEventSchema).optional() })
   .passthrough();
 
 type RawMessage = z.infer<typeof messageSchema>;
@@ -547,6 +603,186 @@ export class HttpGmailDraftWriter implements GmailDraftWriter {
   }
 }
 
+/** Minimal Calendar adapter: it can inspect conflicts and create, but never update or delete, events. */
+export class HttpGoogleCalendarClient implements GoogleCalendarClient {
+  readonly #fetch: FetchImplementation;
+  readonly #timeoutMs: number;
+
+  constructor(private readonly options: HttpGoogleCalendarClientOptions) {
+    this.#fetch = options.fetchImplementation ?? fetch;
+    this.#timeoutMs = options.timeoutMs ?? 10_000;
+    if (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs <= 0) {
+      throw new Error('Google Calendar timeout must be a positive integer');
+    }
+  }
+
+  async findEvent(input: FindGoogleCalendarEventInput): Promise<GoogleCalendarEvent | null> {
+    validateCalendarEventReference(input);
+    try {
+      return await this.#withAccessToken(input.googleConnectionId, async (accessToken) => {
+        const body = parseCalendarResponse(
+          calendarEventSchema,
+          await this.#requestJson(
+            new URL(`${calendarApiBaseUrl}/events/${encodeURIComponent(input.eventId)}`),
+            accessToken,
+          ),
+        );
+        if (body.extendedProperties?.private?.ai_agents_idempotency_key !== input.idempotencyKey) {
+          throw new AgentDependencyError(
+            'CONFLICT',
+            false,
+            'Google Calendar event ID is already owned by another event',
+          );
+        }
+        return { eventId: body.id };
+      });
+    } catch (error) {
+      if (error instanceof AgentDependencyError && error.code === 'NOT_FOUND') return null;
+      throw error;
+    }
+  }
+
+  async findConflictingEvents(
+    input: FindCalendarConflictsInput,
+  ): Promise<readonly GoogleCalendarEvent[]> {
+    validateCalendarTimeRange(input);
+    return this.#withAccessToken(input.googleConnectionId, async (accessToken) => {
+      const url = new URL(`${calendarApiBaseUrl}/events`);
+      url.searchParams.set('timeMin', input.startAt);
+      url.searchParams.set('timeMax', input.endAt);
+      url.searchParams.set('singleEvents', 'true');
+      url.searchParams.set('showDeleted', 'false');
+      url.searchParams.set('orderBy', 'startTime');
+      const body = parseCalendarResponse(
+        calendarEventListSchema,
+        await this.#requestJson(url, accessToken),
+      );
+      return (body.items ?? [])
+        .filter((event) => event.transparency !== 'transparent')
+        .map((event) => ({ eventId: event.id }));
+    });
+  }
+
+  async createEvent(input: CreateGoogleCalendarEventInput): Promise<CreatedGoogleCalendarEvent> {
+    validateCalendarEventReference(input);
+    validateCalendarTimeRange(input);
+    requireIdentifier(input.idempotencyKey, 'Calendar idempotency key');
+    for (const [name, value] of Object.entries({
+      'Calendar description': input.description,
+      'Calendar location': input.location,
+      'Calendar summary': input.summary,
+    })) {
+      if (!value.trim() || value.length > 8_192) {
+        throw new AgentDependencyError('INVALID_REQUEST', false, `${name} is invalid`);
+      }
+    }
+    if (!isValidIanaTimeZone(input.timeZone)) {
+      throw new AgentDependencyError('INVALID_REQUEST', false, 'Calendar timezone is invalid');
+    }
+    return this.#withAccessToken(input.googleConnectionId, async (accessToken) => {
+      const body = parseCalendarResponse(
+        calendarEventSchema,
+        await this.#requestJson(new URL(`${calendarApiBaseUrl}/events`), accessToken, 'POST', {
+          description: input.description,
+          end: { dateTime: input.endAt, timeZone: input.timeZone },
+          extendedProperties: { private: { ai_agents_idempotency_key: input.idempotencyKey } },
+          id: input.eventId,
+          location: input.location,
+          reminders: { useDefault: true },
+          start: { dateTime: input.startAt, timeZone: input.timeZone },
+          summary: input.summary,
+        }),
+      );
+      if (body.id !== input.eventId) {
+        throw new AgentDependencyError(
+          'INVALID_RESPONSE',
+          false,
+          'Google Calendar created an event with an unexpected ID',
+        );
+      }
+      return { eventId: body.id };
+    });
+  }
+
+  async #withAccessToken<T>(
+    connectionId: string,
+    request: (accessToken: string) => Promise<T>,
+  ): Promise<T> {
+    let accessToken = await this.options.accessTokens.getAccessToken(connectionId, [
+      calendarEventsScope,
+    ]);
+    try {
+      return await request(accessToken);
+    } catch (error) {
+      if (!(error instanceof CalendarHttpStatusError) || error.status !== 401) throw error;
+      this.options.accessTokens.invalidateAccessToken(connectionId);
+      accessToken = await this.options.accessTokens.getAccessToken(connectionId, [
+        calendarEventsScope,
+      ]);
+      try {
+        return await request(accessToken);
+      } catch (retryError) {
+        if (retryError instanceof CalendarHttpStatusError && retryError.status === 401) {
+          throw new AgentDependencyError(
+            'AUTHENTICATION_REQUIRED',
+            false,
+            'Google access token was rejected',
+          );
+        }
+        throw retryError;
+      }
+    }
+  }
+
+  async #requestJson(
+    url: URL,
+    accessToken: string,
+    method = 'GET',
+    payload?: unknown,
+  ): Promise<unknown> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
+    try {
+      const response = await this.#fetch(url, {
+        method,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          ...(payload ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(payload ? { body: JSON.stringify(payload) } : {}),
+        signal: controller.signal,
+      });
+      const body = (await response.json().catch(() => null)) as unknown;
+      if (response.status === 401) throw new CalendarHttpStatusError(401);
+      if (!response.ok) throw toCalendarError(response.status, body);
+      if (body === null) {
+        throw new AgentDependencyError(
+          'INVALID_RESPONSE',
+          false,
+          'Google Calendar returned an invalid response',
+        );
+      }
+      return body;
+    } catch (error) {
+      if (error instanceof AgentDependencyError || error instanceof CalendarHttpStatusError)
+        throw error;
+      throw new AgentDependencyError(
+        'TEMPORARY_UNAVAILABLE',
+        true,
+        'Google Calendar service is temporarily unavailable',
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+export function deterministicCalendarEventId(idempotencyKey: string): string {
+  requireIdentifier(idempotencyKey, 'Calendar idempotency key');
+  return `aia${createHash('sha256').update(idempotencyKey).digest('hex')}`;
+}
+
 export function deterministicDraftMessageId(idempotencyKey: string): string {
   requireIdentifier(idempotencyKey, 'Draft idempotency key');
   return `<${createHash('sha256').update(idempotencyKey).digest('hex')}@ai-agents.invalid>`;
@@ -649,6 +885,13 @@ class GmailHttpStatusError extends Error {
   }
 }
 
+class CalendarHttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`Google Calendar request failed with status ${status}`);
+    this.name = 'CalendarHttpStatusError';
+  }
+}
+
 function toGmailError(status: number, body: unknown): AgentDependencyError {
   const reasons = extractGoogleErrorReasons(body);
   if (
@@ -676,10 +919,64 @@ function toGmailError(status: number, body: unknown): AgentDependencyError {
   return new AgentDependencyError('UNKNOWN', false, 'Gmail request failed');
 }
 
+function toCalendarError(status: number, body: unknown): AgentDependencyError {
+  const reasons = extractGoogleErrorReasons(body);
+  if (
+    status === 429 ||
+    (status === 403 && reasons.some((reason) => reason.includes('ratelimit')))
+  ) {
+    return new AgentDependencyError(
+      'RATE_LIMITED',
+      true,
+      'Google Calendar rate limit was exceeded',
+    );
+  }
+  if (status === 408 || status >= 500) {
+    return new AgentDependencyError(
+      'TEMPORARY_UNAVAILABLE',
+      true,
+      'Google Calendar service is temporarily unavailable',
+    );
+  }
+  if (status === 400) {
+    return new AgentDependencyError(
+      'INVALID_REQUEST',
+      false,
+      'Google Calendar rejected the request',
+    );
+  }
+  if (status === 403) {
+    return new AgentDependencyError(
+      'PERMISSION_DENIED',
+      false,
+      'Google Calendar access was denied',
+    );
+  }
+  if (status === 404) {
+    return new AgentDependencyError('NOT_FOUND', false, 'Google Calendar resource was not found');
+  }
+  if (status === 409) {
+    return new AgentDependencyError('CONFLICT', false, 'Google Calendar event already exists');
+  }
+  return new AgentDependencyError('UNKNOWN', false, 'Google Calendar request failed');
+}
+
 function parseGmailResponse<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     throw new AgentDependencyError('INVALID_RESPONSE', false, 'Gmail returned an invalid response');
+  }
+  return parsed.data;
+}
+
+function parseCalendarResponse<T>(schema: z.ZodType<T>, value: unknown): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new AgentDependencyError(
+      'INVALID_RESPONSE',
+      false,
+      'Google Calendar returned an invalid response',
+    );
   }
   return parsed.data;
 }
@@ -897,6 +1194,36 @@ function truncateText(value: string, maximumBytes: number): { text: string; trun
 function requireIdentifier(value: string, label: string): void {
   if (!value.trim()) {
     throw new AgentDependencyError('INVALID_REQUEST', false, `${label} must not be empty`);
+  }
+}
+
+function validateCalendarEventReference(input: FindGoogleCalendarEventInput): void {
+  requireUuid(input.googleConnectionId);
+  requireIdentifier(input.idempotencyKey, 'Calendar idempotency key');
+  if (!/^[a-v0-9]{5,1024}$/u.test(input.eventId)) {
+    throw new AgentDependencyError('INVALID_REQUEST', false, 'Google Calendar event ID is invalid');
+  }
+}
+
+function validateCalendarTimeRange(input: FindCalendarConflictsInput): void {
+  requireUuid(input.googleConnectionId);
+  const startAt = new Date(input.startAt);
+  const endAt = new Date(input.endAt);
+  if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime()) || endAt <= startAt) {
+    throw new AgentDependencyError(
+      'INVALID_REQUEST',
+      false,
+      'Google Calendar time range is invalid',
+    );
+  }
+}
+
+function isValidIanaTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
   }
 }
 

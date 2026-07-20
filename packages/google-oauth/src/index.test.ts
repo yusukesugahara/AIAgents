@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 
 import {
   AesGcmTokenCipher,
+  calendarEventsScope,
   GoogleAccessTokenService,
   type GoogleConnectionCredential,
   type GoogleConnectionCredentialRepository,
@@ -215,6 +216,24 @@ describe('Google OAuth', () => {
       state,
     });
     expect(connections.saved[0]?.grantedScopes).toContain(gmailComposeScope);
+  });
+
+  test('requests and records the Calendar events scope only for Calendar authorization', async () => {
+    const { connections, provider, service } = createService();
+    provider.tokens = {
+      ...provider.tokens,
+      grantedScopes: [...provider.tokens.grantedScopes, calendarEventsScope],
+    };
+    const authorization = await service.begin('calendar_events');
+    const state = new URL(authorization.authorizationUrl).searchParams.get('state') ?? '';
+
+    expect(provider.authorizationRequests[0]?.scopes).toContain(calendarEventsScope);
+    await service.complete({
+      browserNonce: authorization.browserNonce,
+      code: 'authorization-code',
+      state,
+    });
+    expect(connections.saved[0]?.grantedScopes).toContain(calendarEventsScope);
   });
 
   test('rejects a callback from a different browser without consuming its state', async () => {

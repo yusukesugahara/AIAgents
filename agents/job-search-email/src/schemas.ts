@@ -176,7 +176,7 @@ export const jobSearchEmailOutputSchema = z
   .object({
     analysis: jobEmailAnalysisSchema.nullable(),
     draftId: z.string().trim().min(1).max(255).nullable(),
-    calendarEventId: z.null(),
+    calendarEventId: z.string().trim().min(1).max(1_024).nullable(),
     result: z.enum(['completed', 'skipped', 'needs_review']),
   })
   .strict()
@@ -193,6 +193,13 @@ export const jobSearchEmailOutputSchema = z
         code: 'custom',
         message: 'Only completed results may contain a Draft ID',
         path: ['draftId'],
+      });
+    }
+    if (output.result !== 'completed' && output.calendarEventId !== null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Only completed results may contain a Calendar event ID',
+        path: ['calendarEventId'],
       });
     }
     if (output.result === 'skipped' && output.analysis?.isJobRelated !== false) {

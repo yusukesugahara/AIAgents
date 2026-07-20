@@ -12,6 +12,7 @@ export {
   PostgresJobEmailAnalysisRepository,
   PostgresJobEmailReviewRequestRepository,
 } from './postgres-job-email-analysis';
+export { PostgresJobEmailCalendarEventRepository } from './postgres-job-email-calendar';
 export {
   PostgresJobEmailDraftRepository,
   PostgresJobEmailSettingsRepository,

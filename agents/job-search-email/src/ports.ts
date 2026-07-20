@@ -1,4 +1,10 @@
-import type { CreatedGmailDraft, GmailDraftWriter, GmailReader } from '@ai-agents/connector-google';
+import type {
+  CreatedGmailDraft,
+  CreatedGoogleCalendarEvent,
+  GmailDraftWriter,
+  GmailReader,
+  GoogleCalendarClient,
+} from '@ai-agents/connector-google';
 import type { LlmInvocationMetadata, LlmProvider } from '@ai-agents/llm';
 import type { JobEmailAnalysis } from './schemas';
 
@@ -38,7 +44,13 @@ export type JobEmailReviewReason =
   | 'reply_low_confidence'
   | 'reply_settings_missing'
   | 'reply_target_stale'
-  | 'reply_warnings';
+  | 'reply_warnings'
+  | 'calendar_conflict'
+  | 'calendar_datetime_invalid'
+  | 'calendar_information_missing'
+  | 'calendar_low_confidence'
+  | 'calendar_permission_missing'
+  | 'calendar_settings_missing';
 
 export interface JobEmailReviewRequestRepository {
   createReviewRequest(input: {
@@ -58,7 +70,14 @@ export interface JobEmailReplySettings {
 }
 
 export interface JobEmailSettingsRepository {
+  getCalendarSettings(googleConnectionId: string): Promise<JobEmailCalendarSettings | null>;
   getReplySettings(googleConnectionId: string): Promise<JobEmailReplySettings | null>;
+}
+
+export interface JobEmailCalendarSettings {
+  readonly calendarConfidenceThreshold: number;
+  readonly createCalendarEvents: boolean;
+  readonly timezone: string;
 }
 
 export interface JobEmailDraftReservation {
@@ -84,8 +103,32 @@ export interface JobEmailDraftRepository {
   }): Promise<JobEmailDraftReservation>;
 }
 
+export interface JobEmailCalendarEventReservation {
+  readonly eventId: string | null;
+  readonly status: 'completed' | 'reserved';
+}
+
+export interface JobEmailCalendarEventRepository {
+  complete(input: {
+    readonly calendarEvent: CreatedGoogleCalendarEvent;
+    readonly idempotencyKey: string;
+    readonly jobId: string;
+    readonly runId: string;
+  }): Promise<void>;
+  reserve(input: {
+    readonly googleConnectionId: string;
+    readonly gmailMessageId: string;
+    readonly gmailThreadId: string;
+    readonly idempotencyKey: string;
+    readonly jobId: string;
+    readonly runId: string;
+  }): Promise<JobEmailCalendarEventReservation>;
+}
+
 export interface JobSearchEmailAgentDependencies {
   readonly analyses: JobEmailAnalysisRepository;
+  readonly calendarEvents: JobEmailCalendarEventRepository;
+  readonly calendar: GoogleCalendarClient;
   readonly drafts: JobEmailDraftRepository;
   readonly gmailDrafts: GmailDraftWriter;
   readonly gmail: Pick<GmailReader, 'getMessage' | 'getThread'>;

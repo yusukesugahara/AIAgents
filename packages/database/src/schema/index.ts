@@ -331,6 +331,38 @@ export const jobEmailDrafts = pgTable(
   ],
 );
 
+export const jobCalendarEvents = pgTable(
+  'job_calendar_events',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    googleConnectionId: uuid('google_connection_id')
+      .notNull()
+      .references(() => connections.id, { onDelete: 'cascade' }),
+    gmailMessageId: text('gmail_message_id').notNull(),
+    gmailThreadId: text('gmail_thread_id').notNull(),
+    jobId: uuid('job_id')
+      .notNull()
+      .references(() => agentJobs.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('creating'),
+    idempotencyKey: text('idempotency_key').notNull(),
+    googleEventId: text('google_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex('job_calendar_events_connection_message_unique').on(
+      table.googleConnectionId,
+      table.gmailMessageId,
+    ),
+    uniqueIndex('job_calendar_events_idempotency_key_unique').on(table.idempotencyKey),
+    uniqueIndex('job_calendar_events_google_event_id_unique').on(table.googleEventId),
+    check('job_calendar_events_status_check', sql`${table.status} IN ('creating', 'completed')`),
+  ],
+);
+
 export const usersRelations = relations(users, ({ many }) => ({
   connections: many(connections),
 }));
@@ -341,6 +373,7 @@ export const connectionsRelations = relations(connections, ({ one, many }) => ({
     references: [users.id],
   }),
   jobEmailAnalyses: many(jobEmailAnalyses),
+  jobCalendarEvents: many(jobCalendarEvents),
   jobEmailDrafts: many(jobEmailDrafts),
 }));
 
@@ -356,6 +389,7 @@ export const agentRunsRelations = relations(agentRuns, ({ one, many }) => ({
   steps: many(agentRunSteps),
   llmInvocations: many(llmInvocations),
   jobEmailAnalyses: many(jobEmailAnalyses),
+  jobCalendarEvents: many(jobCalendarEvents),
   reviewRequests: many(reviewRequests),
   jobEmailDrafts: many(jobEmailDrafts),
 }));
@@ -391,6 +425,14 @@ export const jobEmailDraftsRelations = relations(jobEmailDrafts, ({ one }) => ({
     references: [connections.id],
   }),
   run: one(agentRuns, { fields: [jobEmailDrafts.runId], references: [agentRuns.id] }),
+}));
+
+export const jobCalendarEventsRelations = relations(jobCalendarEvents, ({ one }) => ({
+  connection: one(connections, {
+    fields: [jobCalendarEvents.googleConnectionId],
+    references: [connections.id],
+  }),
+  run: one(agentRuns, { fields: [jobCalendarEvents.runId], references: [agentRuns.id] }),
 }));
 
 export const reviewRequestsRelations = relations(reviewRequests, ({ one }) => ({

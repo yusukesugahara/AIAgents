@@ -147,9 +147,9 @@ describe('API app', () => {
   test('starts and completes public Google OAuth routes without exposing callback credentials', async () => {
     const completed: Array<{ browserNonce: string; code: string; state: string }> = [];
     const cancelled: Array<{ browserNonce: string; state: string }> = [];
-    const purposes: Array<'gmail_compose' | 'gmail_read' | undefined> = [];
+    const purposes: Array<'calendar_events' | 'gmail_compose' | 'gmail_read' | undefined> = [];
     const googleOAuth = {
-      begin: async (purpose?: 'gmail_compose' | 'gmail_read') => {
+      begin: async (purpose?: 'calendar_events' | 'gmail_compose' | 'gmail_read') => {
         purposes.push(purpose);
         return {
           authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=secret-state',
@@ -182,7 +182,10 @@ describe('API app', () => {
     const composeStart = await app.request('/auth/google/compose');
     expect(composeStart.status).toBe(303);
     expect(composeStart.headers.get('set-cookie')).toContain('ai_agents_oauth_nonce=');
-    expect(purposes).toEqual(['gmail_read', 'gmail_compose']);
+    const calendarStart = await app.request('/auth/google/calendar');
+    expect(calendarStart.status).toBe(303);
+    expect(calendarStart.headers.get('set-cookie')).toContain('ai_agents_oauth_nonce=');
+    expect(purposes).toEqual(['gmail_read', 'gmail_compose', 'calendar_events']);
 
     const callback = await app.request('/auth/google/callback?code=code-value&state=state-value', {
       headers: { Cookie: cookie },

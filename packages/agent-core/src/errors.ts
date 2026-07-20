@@ -22,6 +22,7 @@ export type AgentDependencyErrorCode =
   | 'RATE_LIMITED'
   | 'TEMPORARY_UNAVAILABLE'
   | 'INVALID_REQUEST'
+  | 'CONFLICT'
   | 'PERMISSION_DENIED'
   | 'NOT_FOUND'
   | 'INVALID_RESPONSE'

@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test';
 import type { GoogleAccessTokenProvider } from '@ai-agents/google-oauth';
 import {
   createReplyMime,
+  deterministicCalendarEventId,
   deterministicDraftMessageId,
   HttpGmailDraftWriter,
   HttpGmailReader,
+  HttpGoogleCalendarClient,
 } from './index';
 
 const base64Url = (value: string | Uint8Array) => Buffer.from(value).toString('base64url');
@@ -419,6 +421,185 @@ describe('HttpGmailReader', () => {
     await expect(
       reader.getMessage({ googleConnectionId: connectionId, gmailMessageId: 'message-1' }),
     ).rejects.toMatchObject({ code: 'TEMPORARY_UNAVAILABLE', retryable: true });
+  });
+});
+
+describe('HttpGoogleCalendarClient', () => {
+  test('searches the primary calendar for conflicts using the requested interval', async () => {
+    const tokens = new FakeAccessTokens();
+    let requestUrl: URL | undefined;
+    const calendar = new HttpGoogleCalendarClient({
+      accessTokens: tokens,
+      fetchImplementation: async (input) => {
+        requestUrl = new URL(String(input));
+        return response({ items: [{ id: 'busy-event' }] });
+      },
+    });
+
+    await expect(
+      calendar.findConflictingEvents({
+        endAt: '2026-07-21T02:00:00.000Z',
+        googleConnectionId: connectionId,
+        startAt: '2026-07-21T01:00:00.000Z',
+      }),
+    ).resolves.toEqual([{ eventId: 'busy-event' }]);
+    expect(requestUrl?.pathname).toBe('/calendar/v3/calendars/primary/events');
+    expect(requestUrl?.searchParams.get('timeMin')).toBe('2026-07-21T01:00:00.000Z');
+    expect(requestUrl?.searchParams.get('timeMax')).toBe('2026-07-21T02:00:00.000Z');
+    expect(tokens.scopes).toEqual([['https://www.googleapis.com/auth/calendar.events']]);
+  });
+
+  test('ignores transparent events when searching for conflicts', async () => {
+    const calendar = new HttpGoogleCalendarClient({
+      accessTokens: new FakeAccessTokens(),
+      fetchImplementation: async () =>
+        response({
+          items: [
+            { id: 'available-event', transparency: 'transparent' },
+            { id: 'busy-event', transparency: 'opaque' },
+          ],
+        }),
+    });
+
+    await expect(
+      calendar.findConflictingEvents({
+        endAt: '2026-07-21T02:00:00.000Z',
+        googleConnectionId: connectionId,
+        startAt: '2026-07-21T01:00:00.000Z',
+      }),
+    ).resolves.toEqual([{ eventId: 'busy-event' }]);
+  });
+
+  test('only recovers a deterministic event owned by the requested idempotency key', async () => {
+    const idempotencyKey = 'calendar-event:connection:message:policy-v1';
+    const eventId = deterministicCalendarEventId(idempotencyKey);
+    const ownedCalendar = new HttpGoogleCalendarClient({
+      accessTokens: new FakeAccessTokens(),
+      fetchImplementation: async () =>
+        response({
+          extendedProperties: { private: { ai_agents_idempotency_key: idempotencyKey } },
+          id: eventId,
+        }),
+    });
+
+    await expect(
+      ownedCalendar.findEvent({ eventId, googleConnectionId: connectionId, idempotencyKey }),
+    ).resolves.toEqual({ eventId });
+
+    const foreignCalendar = new HttpGoogleCalendarClient({
+      accessTokens: new FakeAccessTokens(),
+      fetchImplementation: async () => response({ id: eventId }),
+    });
+    await expect(
+      foreignCalendar.findEvent({ eventId, googleConnectionId: connectionId, idempotencyKey }),
+    ).rejects.toMatchObject({ code: 'CONFLICT', retryable: false });
+  });
+
+  test('retries one rejected Calendar token and maps a second rejection to authentication required', async () => {
+    const tokens = new FakeAccessTokens();
+    let calls = 0;
+    const calendar = new HttpGoogleCalendarClient({
+      accessTokens: tokens,
+      fetchImplementation: async () => {
+        calls += 1;
+        return calls === 1 ? response({}, 401) : response({ items: [] });
+      },
+    });
+    const interval = {
+      endAt: '2026-07-21T02:00:00.000Z',
+      googleConnectionId: connectionId,
+      startAt: '2026-07-21T01:00:00.000Z',
+    };
+
+    await expect(calendar.findConflictingEvents(interval)).resolves.toEqual([]);
+    expect(tokens.calls).toBe(2);
+    expect(tokens.invalidations).toEqual([connectionId]);
+
+    const rejected = new HttpGoogleCalendarClient({
+      accessTokens: tokens,
+      fetchImplementation: async () => response({}, 401),
+    });
+    await expect(rejected.findConflictingEvents(interval)).rejects.toMatchObject({
+      code: 'AUTHENTICATION_REQUIRED',
+      retryable: false,
+    });
+  });
+
+  test('maps Calendar permission, rate-limit, not-found, and invalid payload responses', async () => {
+    const interval = {
+      endAt: '2026-07-21T02:00:00.000Z',
+      googleConnectionId: connectionId,
+      startAt: '2026-07-21T01:00:00.000Z',
+    };
+    for (const [status, expected] of [
+      [403, { code: 'PERMISSION_DENIED', retryable: false }],
+      [429, { code: 'RATE_LIMITED', retryable: true }],
+    ] as const) {
+      const calendar = new HttpGoogleCalendarClient({
+        accessTokens: new FakeAccessTokens(),
+        fetchImplementation: async () => response({}, status),
+      });
+      await expect(calendar.findConflictingEvents(interval)).rejects.toMatchObject(expected);
+    }
+
+    const idempotencyKey = 'calendar-event:connection:message:policy-v1';
+    const eventId = deterministicCalendarEventId(idempotencyKey);
+    const missing = new HttpGoogleCalendarClient({
+      accessTokens: new FakeAccessTokens(),
+      fetchImplementation: async () => response({}, 404),
+    });
+    await expect(
+      missing.findEvent({ eventId, googleConnectionId: connectionId, idempotencyKey }),
+    ).resolves.toBeNull();
+
+    const invalid = new HttpGoogleCalendarClient({
+      accessTokens: new FakeAccessTokens(),
+      fetchImplementation: async () => response({ items: [{ summary: 'missing id' }] }),
+    });
+    await expect(invalid.findConflictingEvents(interval)).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+      retryable: false,
+    });
+  });
+
+  test('creates a deterministic event in the primary calendar with default reminders', async () => {
+    let method = '';
+    let payload: Record<string, unknown> | undefined;
+    const idempotencyKey = 'calendar-event:connection:message:policy-v1';
+    const eventId = deterministicCalendarEventId(idempotencyKey);
+    const calendar = new HttpGoogleCalendarClient({
+      accessTokens: new FakeAccessTokens(),
+      fetchImplementation: async (_input, init) => {
+        method = init?.method ?? '';
+        payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return response({ id: eventId });
+      },
+    });
+
+    await expect(
+      calendar.createEvent({
+        description: '会社名: Example株式会社',
+        endAt: '2026-07-21T11:00:00+09:00',
+        eventId,
+        googleConnectionId: connectionId,
+        idempotencyKey,
+        location: 'https://meet.example.com/interview',
+        startAt: '2026-07-21T10:00:00+09:00',
+        summary: '【面談】Example株式会社',
+        timeZone: 'Asia/Tokyo',
+      }),
+    ).resolves.toEqual({ eventId });
+    expect(method).toBe('POST');
+    expect(payload).toMatchObject({
+      description: '会社名: Example株式会社',
+      end: { dateTime: '2026-07-21T11:00:00+09:00', timeZone: 'Asia/Tokyo' },
+      extendedProperties: { private: { ai_agents_idempotency_key: idempotencyKey } },
+      id: eventId,
+      location: 'https://meet.example.com/interview',
+      reminders: { useDefault: true },
+      start: { dateTime: '2026-07-21T10:00:00+09:00', timeZone: 'Asia/Tokyo' },
+      summary: '【面談】Example株式会社',
+    });
   });
 });
 

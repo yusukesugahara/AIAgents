@@ -1,13 +1,18 @@
 import { createRuntimeAgentRegistry } from '@ai-agents/agent-composition';
 import { AgentRunner } from '@ai-agents/agent-core';
 import { loadJobEmailAnalysisRuntimeConfig, loadJobRuntimeConfig } from '@ai-agents/config';
-import { HttpGmailDraftWriter, HttpGmailReader } from '@ai-agents/connector-google';
+import {
+  HttpGmailDraftWriter,
+  HttpGmailReader,
+  HttpGoogleCalendarClient,
+} from '@ai-agents/connector-google';
 import {
   createDatabaseConnection,
   type DatabaseConnection,
   PostgresAgentRunRepository,
   PostgresGoogleConnectionRepository,
   PostgresJobEmailAnalysisRepository,
+  PostgresJobEmailCalendarEventRepository,
   PostgresJobEmailDraftRepository,
   PostgresJobEmailReviewRequestRepository,
   PostgresJobEmailSettingsRepository,
@@ -52,6 +57,8 @@ const accessTokens = new GoogleAccessTokenService({
 });
 const jobSearchEmailAgent = createJobSearchEmailAgent({
   analyses: new PostgresJobEmailAnalysisRepository(database),
+  calendar: new HttpGoogleCalendarClient({ accessTokens }),
+  calendarEvents: new PostgresJobEmailCalendarEventRepository(database),
   drafts: new PostgresJobEmailDraftRepository(database),
   gmailDrafts: new HttpGmailDraftWriter({ accessTokens }),
   gmail: new HttpGmailReader({ accessTokens }),

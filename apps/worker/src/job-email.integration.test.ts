@@ -3,15 +3,18 @@ import { createRuntimeAgentRegistry } from '@ai-agents/agent-composition';
 import { AgentRunner } from '@ai-agents/agent-core';
 import type {
   CreatedGmailDraft,
+  CreatedGoogleCalendarEvent,
   EmailMessage,
   EmailThread,
   GmailDraftWriter,
   GmailReader,
+  GoogleCalendarClient,
 } from '@ai-agents/connector-google';
 import {
   createDatabaseConnection,
   PostgresAgentRunRepository,
   PostgresJobEmailAnalysisRepository,
+  PostgresJobEmailCalendarEventRepository,
   PostgresJobEmailDraftRepository,
   PostgresJobEmailReviewRequestRepository,
   PostgresJobEmailSettingsRepository,
@@ -83,6 +86,25 @@ class FakeGmailDraftWriter implements GmailDraftWriter {
       messageId: 'worker-draft-message-1',
       threadId: input.gmailThreadId,
     };
+  }
+}
+
+class FakeGoogleCalendar implements GoogleCalendarClient {
+  readonly created: Parameters<GoogleCalendarClient['createEvent']>[0][] = [];
+
+  async createEvent(
+    input: Parameters<GoogleCalendarClient['createEvent']>[0],
+  ): Promise<CreatedGoogleCalendarEvent> {
+    this.created.push(input);
+    return { eventId: input.eventId };
+  }
+
+  async findConflictingEvents(): Promise<[]> {
+    return [];
+  }
+
+  async findEvent(): Promise<null> {
+    return null;
   }
 }
 
@@ -159,10 +181,12 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
     const queue = new PostgresJobQueue(database);
     const runs = new PostgresAgentRunRepository(database);
     const analyses = new PostgresJobEmailAnalysisRepository(database);
+    const calendarEvents = new PostgresJobEmailCalendarEventRepository(database);
     const drafts = new PostgresJobEmailDraftRepository(database);
     const reviews = new PostgresJobEmailReviewRequestRepository(database);
     const settings = new PostgresJobEmailSettingsRepository(database);
     const gmailDrafts = new FakeGmailDraftWriter();
+    const calendar = new FakeGoogleCalendar();
     const email = `worker-analysis-${crypto.randomUUID()}@example.com`;
     const idempotencyPrefix = `worker-analysis-${crypto.randomUUID()}`;
     let worker: WorkerHandle | undefined;
@@ -201,6 +225,8 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
       });
       const jobSearchEmailAgent = createJobSearchEmailAgent({
         analyses,
+        calendar,
+        calendarEvents,
         drafts,
         gmail: new FakeGmailReader(),
         gmailDrafts,
