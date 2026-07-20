@@ -4,6 +4,7 @@ import {
   type DatabaseConnection,
 } from './client';
 
+export { PostgresAgentRunRepository } from './postgres-agent-run';
 export {
   PostgresGoogleConnectionRepository,
   PostgresOAuthStateRepository,
@@ -18,7 +19,7 @@ export {
   PostgresJobEmailSettingsRepository,
 } from './postgres-job-email-draft';
 export type { PostgresJobQueueOptions } from './postgres-job-queue';
-export { PostgresAgentRunRepository, PostgresJobQueue } from './postgres-job-queue';
+export { PostgresJobQueue } from './postgres-job-queue';
 export { PostgresLlmInvocationRepository } from './postgres-llm-invocation';
 export * from './schema';
 export type { CreateDatabaseConnectionOptions, DatabaseConnection };

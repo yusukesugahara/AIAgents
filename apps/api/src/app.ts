@@ -1,70 +1,16 @@
-import { timingSafeEqual } from 'node:crypto';
+import { AgentCoreError, IdempotencyConflictError } from '@ai-agents/agent-core';
+import { GoogleOAuthError } from '@ai-agents/google-oauth';
+import { Hono } from 'hono';
+import { type ApiAppOptions, type ApiEnvironment, ApiError, type ApiLogger } from './api-types';
+import { errorResponse, hasValidBearerToken, isPublicPath, oauthErrorMessage } from './http';
 import {
-  AgentCoreError,
-  type AgentJob,
-  type AgentRegistry,
-  type AgentRun,
-  type AgentRunRepository,
-  type AgentRunStep,
-  type AgentRunStepRepository,
-  IdempotencyConflictError,
-  type JobQueue,
-} from '@ai-agents/agent-core';
-import type { DatabaseConnection } from '@ai-agents/database';
-import {
-  GoogleOAuthError,
-  type GoogleOAuthErrorCode,
-  type GoogleOAuthService,
-} from '@ai-agents/google-oauth';
-import { type Context, Hono } from 'hono';
-import { z } from 'zod';
+  registerAgentRoutes,
+  registerHealthRoutes,
+  registerOAuthRoutes,
+  registerRunRoutes,
+} from './routes';
 
-interface ApiEnvironment {
-  Variables: {
-    requestId: string;
-  };
-}
-
-export interface ApiLogger {
-  info(entry: Record<string, unknown>): void;
-  error(entry: Record<string, unknown>): void;
-}
-
-export interface ApiAppOptions {
-  accessToken?: string;
-  database?: Pick<DatabaseConnection, 'isReady'> &
-    Partial<Pick<DatabaseConnection, 'isSchemaReady'>>;
-  logger?: ApiLogger;
-  googleOAuth?: Pick<GoogleOAuthService, 'begin' | 'cancel' | 'complete'>;
-  oauthRequired?: boolean;
-  oauthCookieSecure?: boolean;
-  queue?: JobQueue;
-  registry?: AgentRegistry;
-  requestIdGenerator?: () => string;
-  runs?: Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> &
-    Partial<Pick<AgentRunStepRepository, 'getSteps'>>;
-}
-
-class ApiError extends Error {
-  constructor(
-    readonly code: string,
-    readonly status: 400 | 401 | 404 | 409 | 500,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'ApiError';
-  }
-}
-
-const runRequestSchema = z
-  .object({
-    input: z.unknown(),
-    idempotencyKey: z.string().trim().min(1).max(255).optional(),
-  })
-  .strict()
-  .refine((value) => Object.hasOwn(value, 'input'), { message: 'input is required' });
-
-const jobIdSchema = z.uuid();
+export type { ApiAppOptions, ApiLogger } from './api-types';
 
 export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
   const app = new Hono<ApiEnvironment>();
@@ -75,7 +21,6 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
     const requestId = context.req.header('X-Request-Id')?.trim() || requestIdGenerator();
     context.set('requestId', requestId);
     context.header('X-Request-Id', requestId);
-
     try {
       if (
         options.accessToken &&
@@ -84,7 +29,6 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
       ) {
         return errorResponse(context, 'UNAUTHORIZED', 401, 'Authentication is required');
       }
-
       await next();
     } finally {
       logger.info({
@@ -97,189 +41,22 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
     }
   });
 
-  app.get('/health/live', (context) => context.json({ status: 'ok' }));
-
-  app.get('/auth/google', async (context) => {
-    context.header('Cache-Control', 'no-store');
-    context.header('Referrer-Policy', 'no-referrer');
-    const authorization = await requireGoogleOAuth(options).begin('gmail_read');
-    context.header(
-      'Set-Cookie',
-      serializeOAuthCookie(authorization.browserNonce, options.oauthCookieSecure ?? false),
-    );
-    logger.info({
-      event: 'oauth.google.authorization_started',
-      requestId: context.get('requestId'),
-    });
-    return context.redirect(authorization.authorizationUrl, 303);
-  });
-
-  app.get('/auth/google/compose', async (context) => {
-    context.header('Cache-Control', 'no-store');
-    context.header('Referrer-Policy', 'no-referrer');
-    const authorization = await requireGoogleOAuth(options).begin('gmail_compose');
-    context.header(
-      'Set-Cookie',
-      serializeOAuthCookie(authorization.browserNonce, options.oauthCookieSecure ?? false),
-    );
-    logger.info({
-      event: 'oauth.google.compose_authorization_started',
-      requestId: context.get('requestId'),
-    });
-    return context.redirect(authorization.authorizationUrl, 303);
-  });
-
-  app.get('/auth/google/calendar', async (context) => {
-    context.header('Cache-Control', 'no-store');
-    context.header('Referrer-Policy', 'no-referrer');
-    const authorization = await requireGoogleOAuth(options).begin('calendar_events');
-    context.header(
-      'Set-Cookie',
-      serializeOAuthCookie(authorization.browserNonce, options.oauthCookieSecure ?? false),
-    );
-    logger.info({
-      event: 'oauth.google.calendar_authorization_started',
-      requestId: context.get('requestId'),
-    });
-    return context.redirect(authorization.authorizationUrl, 303);
-  });
-
-  app.get('/auth/google/callback', async (context) => {
-    const state = context.req.query('state') ?? '';
-    const authorizationError = context.req.query('error');
-    const browserNonce = readCookie(context.req.header('Cookie'), oauthCookieName) ?? '';
-    context.header('Cache-Control', 'no-store');
-    context.header('Referrer-Policy', 'no-referrer');
-    context.header('Set-Cookie', clearOAuthCookie(options.oauthCookieSecure ?? false));
-    const googleOAuth = requireGoogleOAuth(options);
-
-    if (authorizationError) {
-      await googleOAuth.cancel({ browserNonce, state });
-      if (authorizationError === 'access_denied') {
-        throw new GoogleOAuthError('OAUTH_AUTHORIZATION_DENIED', 'Google authorization was denied');
-      }
-      throw new GoogleOAuthError('OAUTH_PROVIDER_FAILURE', 'Google authorization failed');
-    }
-
-    await googleOAuth.complete({
-      browserNonce,
-      code: context.req.query('code') ?? '',
-      state,
-    });
-    logger.info({ event: 'oauth.google.connected', requestId: context.get('requestId') });
-    return context.redirect('/auth/google/complete', 303);
-  });
-
-  app.get('/auth/google/complete', (context) => {
-    context.header('Cache-Control', 'no-store');
-    return context.json({ status: 'completed' });
-  });
-
-  app.get('/health/ready', async (context) => {
-    const databaseReady = options.database
-      ? options.database.isSchemaReady
-        ? await options.database.isSchemaReady()
-        : await options.database.isReady()
-      : false;
-    const ready = databaseReady && (!options.oauthRequired || options.googleOAuth !== undefined);
-
-    if (!ready) {
-      return context.json({ status: 'not_ready' }, 503);
-    }
-
-    return context.json({ status: 'ok' });
-  });
-
-  app.get('/agents', (context) => {
-    const registry = requireRegistry(options);
-    return context.json({ agents: registry.list().map((agent) => agent.manifest) });
-  });
-
-  app.get('/agents/:agentId', (context) => {
-    const registry = requireRegistry(options);
-    const agent = getAgent(registry, context.req.param('agentId'));
-    return context.json({ agent: agent.manifest });
-  });
-
-  app.post('/agents/:agentId/runs', async (context) => {
-    const registry = requireRegistry(options);
-    const queue = requireQueue(options);
-    const agent = getAgent(registry, context.req.param('agentId'));
-
-    if (!agent.manifest.triggers.includes('manual')) {
-      throw new ApiError(
-        'AGENT_TRIGGER_UNSUPPORTED',
-        400,
-        `Agent "${agent.manifest.id}" does not support manual runs`,
-      );
-    }
-
-    const payload = await parseRunRequest(context);
-    const inputResult = agent.inputSchema.safeParse(payload.input);
-
-    if (!inputResult.success) {
-      throw new ApiError('BAD_REQUEST', 400, inputResult.error.message);
-    }
-
-    const enqueueInput = {
-      agentId: agent.manifest.id,
-      input: inputResult.data,
-      triggerType: 'manual',
-      ...(payload.idempotencyKey ? { idempotencyKey: payload.idempotencyKey } : {}),
-    };
-    const job = await queue.enqueue(enqueueInput);
-    logger.info({
-      agentId: agent.manifest.id,
-      event: 'api.job.enqueued',
-      jobId: job.id,
-      requestId: context.get('requestId'),
-    });
-
-    return context.json({ jobId: job.id }, 202);
-  });
-
-  app.get('/jobs/:jobId', async (context) => {
-    const jobId = parseId(context.req.param('jobId'));
-    const job = await requireQueue(options).get(jobId);
-
-    if (!job) {
-      throw new ApiError('JOB_NOT_FOUND', 404, `Job "${jobId}" was not found`);
-    }
-
-    const runs = requireRunRepository(options);
-    const latestRun = await runs.getLatestRunForJob(jobId);
-    const steps = latestRun && runs.getSteps ? await runs.getSteps(latestRun.id) : [];
-    return context.json({ job: toJobResponse(job, latestRun, steps) });
-  });
-
-  app.get('/runs/:runId', async (context) => {
-    const runId = parseId(context.req.param('runId'));
-    const runs = requireRunRepository(options);
-    const run = await runs.getRun(runId);
-
-    if (!run) {
-      throw new ApiError('RUN_NOT_FOUND', 404, `Run "${runId}" was not found`);
-    }
-
-    const steps = runs.getSteps ? await runs.getSteps(runId) : [];
-    return context.json({ run: toRunResponse(run, steps) });
-  });
+  registerHealthRoutes(app, options);
+  registerOAuthRoutes(app, options, logger);
+  registerAgentRoutes(app, options, logger);
+  registerRunRoutes(app, options);
 
   app.notFound((context) => errorResponse(context, 'NOT_FOUND', 404, 'Route was not found'));
-
   app.onError((error, context) => {
     if (error instanceof ApiError) {
       return errorResponse(context, error.code, error.status, error.message);
     }
-
     if (error instanceof AgentCoreError && error.code === 'AGENT_NOT_FOUND') {
       return errorResponse(context, 'AGENT_NOT_FOUND', 404, error.message);
     }
-
     if (error instanceof IdempotencyConflictError) {
       return errorResponse(context, 'IDEMPOTENCY_CONFLICT', 409, error.message);
     }
-
     if (error instanceof GoogleOAuthError) {
       const status =
         error.code === 'OAUTH_STATE_INVALID' ||
@@ -295,7 +72,6 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
       });
       return errorResponse(context, error.code, status, oauthErrorMessage(error.code));
     }
-
     logger.error({
       event: 'api.request.failed',
       message: error instanceof Error ? error.message : 'Unknown error',
@@ -305,266 +81,6 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
   });
 
   return app;
-}
-
-function requireGoogleOAuth(
-  options: ApiAppOptions,
-): Pick<GoogleOAuthService, 'begin' | 'cancel' | 'complete'> {
-  if (!options.googleOAuth) {
-    throw new GoogleOAuthError('OAUTH_CONFIGURATION_INVALID', 'Google OAuth is not configured');
-  }
-  return options.googleOAuth;
-}
-
-function requireRegistry(options: ApiAppOptions): AgentRegistry {
-  if (!options.registry) {
-    throw new ApiError('INTERNAL_ERROR', 500, 'Agent Registry is not configured');
-  }
-
-  return options.registry;
-}
-
-function requireQueue(options: ApiAppOptions): JobQueue {
-  if (!options.queue) {
-    throw new ApiError('INTERNAL_ERROR', 500, 'Job Queue is not configured');
-  }
-
-  return options.queue;
-}
-
-function requireRunRepository(
-  options: ApiAppOptions,
-): Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> &
-  Partial<Pick<AgentRunStepRepository, 'getSteps'>> {
-  if (!options.runs) {
-    throw new ApiError('INTERNAL_ERROR', 500, 'Run Repository is not configured');
-  }
-
-  return options.runs;
-}
-
-function getAgent(registry: AgentRegistry, agentId: string) {
-  try {
-    return registry.get(agentId);
-  } catch (error) {
-    if (error instanceof AgentCoreError && error.code === 'AGENT_NOT_FOUND') {
-      throw new ApiError('AGENT_NOT_FOUND', 404, `Agent "${agentId}" was not found`);
-    }
-
-    throw error;
-  }
-}
-
-async function parseRunRequest(context: Context<ApiEnvironment>) {
-  let body: unknown;
-
-  try {
-    body = await context.req.json();
-  } catch {
-    throw new ApiError('BAD_REQUEST', 400, 'Request body must be valid JSON');
-  }
-
-  const parsed = runRequestSchema.safeParse(body);
-  if (!parsed.success) {
-    throw new ApiError('BAD_REQUEST', 400, parsed.error.message);
-  }
-
-  return parsed.data;
-}
-
-function parseId(value: string): string {
-  const parsed = jobIdSchema.safeParse(value);
-
-  if (!parsed.success) {
-    throw new ApiError('BAD_REQUEST', 400, 'ID must be a valid UUID');
-  }
-
-  return parsed.data;
-}
-
-function toJobResponse(
-  job: AgentJob,
-  latestRun: AgentRun | null,
-  latestRunSteps: readonly AgentRunStep[] = [],
-) {
-  return {
-    agentId: job.agentId,
-    attempts: job.attempts,
-    availableAt: toIsoString(job.availableAt),
-    completedAt: job.completedAt ? toIsoString(job.completedAt) : null,
-    createdAt: toIsoString(job.createdAt),
-    errorCode: job.lastErrorCode,
-    hasError: job.lastErrorCode !== null || job.lastError !== null,
-    id: job.id,
-    latestRun: latestRun ? toRunResponse(latestRun, latestRunSteps) : null,
-    latestRunId: latestRun?.id ?? null,
-    status: job.status,
-  };
-}
-
-function toRunResponse(run: AgentRun, steps: readonly AgentRunStep[] = []) {
-  return {
-    agentId: run.agentId,
-    completedAt: run.completedAt ? toIsoString(run.completedAt) : null,
-    errorCode: run.errorCode,
-    id: run.id,
-    jobId: run.jobId,
-    startedAt: toIsoString(run.startedAt),
-    status: run.status,
-    output: toJobSearchEmailOutput(run),
-    steps:
-      run.agentId === 'job-search-email'
-        ? [...steps].sort((left, right) => left.sequence - right.sequence).map(toStepResponse)
-        : [],
-    triggerType: run.triggerType,
-  };
-}
-
-function toJobSearchEmailOutput(run: AgentRun): {
-  readonly calendarEventId: string | null;
-  readonly draftId: string | null;
-  readonly result: string;
-} | null {
-  if (run.agentId !== 'job-search-email' || !run.output || typeof run.output !== 'object') {
-    return null;
-  }
-  const output = run.output as Record<string, unknown>;
-  const result = output.result;
-  const draftId = output.draftId;
-  const calendarEventId = output.calendarEventId;
-  if (
-    !isJobSearchEmailResult(result) ||
-    !isNullableBoundedString(draftId) ||
-    !isNullableBoundedString(calendarEventId)
-  ) {
-    return null;
-  }
-  return { calendarEventId, draftId, result };
-}
-
-function isJobSearchEmailResult(value: unknown): value is 'completed' | 'needs_review' | 'skipped' {
-  return value === 'completed' || value === 'needs_review' || value === 'skipped';
-}
-
-function isNullableBoundedString(value: unknown): value is string | null {
-  return value === null || (typeof value === 'string' && value.length <= 1_024);
-}
-
-function toStepResponse(step: AgentRunStep) {
-  return {
-    completedAt: step.completedAt ? toIsoString(step.completedAt) : null,
-    errorCode: step.errorCode,
-    output: toSafeStepOutput(step.output),
-    sequence: step.sequence,
-    startedAt: toIsoString(step.startedAt),
-    status: step.status,
-    stepName: step.stepName,
-  };
-}
-
-function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const output = value as Record<string, unknown>;
-  const safeStringKeys = [
-    'calendarEventId',
-    'category',
-    'draftId',
-    'gmailMessageId',
-    'gmailThreadId',
-    'outcome',
-    'result',
-    'reviewReason',
-  ] as const;
-  const safeBooleanKeys = ['applicable', 'isJobRelated', 'retryable'] as const;
-  const safeOutput: Record<string, unknown> = {};
-  for (const key of safeStringKeys) {
-    const field = output[key];
-    if (typeof field === 'string' && field.length <= 1_024) safeOutput[key] = field;
-  }
-  for (const key of safeBooleanKeys) {
-    const field = output[key];
-    if (typeof field === 'boolean') safeOutput[key] = field;
-  }
-  if (
-    typeof output.messageCount === 'number' &&
-    Number.isSafeInteger(output.messageCount) &&
-    output.messageCount >= 0
-  ) {
-    safeOutput.messageCount = output.messageCount;
-  }
-  return safeOutput;
-}
-
-function toIsoString(value: Date | string): string {
-  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
-}
-
-function errorResponse(
-  context: Context<ApiEnvironment>,
-  code: string,
-  status: 400 | 401 | 404 | 409 | 500,
-  message: string,
-) {
-  const requestId = context.get('requestId');
-  context.header('X-Request-Id', requestId);
-  return context.json({ error: { code, message, requestId } }, status);
-}
-
-function hasValidBearerToken(authorization: string | undefined, expectedToken: string): boolean {
-  const token = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
-  const encoder = new TextEncoder();
-  const actual = encoder.encode(token);
-  const expected = encoder.encode(expectedToken);
-
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
-
-function isPublicPath(pathname: string): boolean {
-  return (
-    pathname.startsWith('/health/') ||
-    pathname === '/auth/google' ||
-    pathname === '/auth/google/compose' ||
-    pathname === '/auth/google/calendar' ||
-    pathname === '/auth/google/callback' ||
-    pathname === '/auth/google/complete'
-  );
-}
-
-const oauthCookieName = 'ai_agents_oauth_nonce';
-
-function serializeOAuthCookie(value: string, secure: boolean): string {
-  return `${oauthCookieName}=${value}; Path=/auth/google; Max-Age=600; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`;
-}
-
-function clearOAuthCookie(secure: boolean): string {
-  return `${oauthCookieName}=; Path=/auth/google; Max-Age=0; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`;
-}
-
-function readCookie(header: string | undefined, name: string): string | undefined {
-  if (!header) {
-    return undefined;
-  }
-  return header
-    .split(';')
-    .map((value) => value.trim())
-    .find((value) => value.startsWith(`${name}=`))
-    ?.slice(name.length + 1);
-}
-
-function oauthErrorMessage(code: GoogleOAuthErrorCode): string {
-  switch (code) {
-    case 'OAUTH_STATE_INVALID':
-      return 'OAuth authorization is invalid or expired';
-    case 'OAUTH_AUTHORIZATION_DENIED':
-      return 'Google authorization was denied';
-    case 'OAUTH_PROFILE_INVALID':
-      return 'Google account email could not be verified';
-    case 'OAUTH_REFRESH_TOKEN_MISSING':
-      return 'Google did not grant offline access';
-    case 'OAUTH_CONFIGURATION_INVALID':
-    case 'OAUTH_PROVIDER_FAILURE':
-      return 'Google OAuth is temporarily unavailable';
-  }
 }
 
 const consoleLogger: ApiLogger = {
