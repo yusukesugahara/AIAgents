@@ -306,6 +306,12 @@ describe('API app', () => {
     expect(await listResponse.json()).toEqual({
       agents: [
         {
+          id: 'job-search-email',
+          name: '就職活動メールエージェント',
+          version: '0.2.0',
+          triggers: ['manual', 'schedule', 'gmail-push'],
+        },
+        {
           id: 'echo',
           name: 'Development Echo Agent',
           version: '0.1.0',
@@ -321,6 +327,32 @@ describe('API app', () => {
         triggers: ['manual'],
       },
     });
+  });
+
+  test('validates and enqueues Job Search Email input without executing the Agent', async () => {
+    const queue = new FakeJobQueue();
+    const app = createConfiguredApp({ queue });
+    const validInput = {
+      googleConnectionId: '0198d171-8d5f-7b1a-8812-0123456789ab',
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    };
+    const accepted = await app.request('/agents/job-search-email/runs', {
+      method: 'POST',
+      body: JSON.stringify({ input: validInput }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const rejected = await app.request('/agents/job-search-email/runs', {
+      method: 'POST',
+      body: JSON.stringify({ input: { ...validInput, googleConnectionId: 'not-a-uuid' } }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    expect(accepted.status).toBe(202);
+    expect(queue.enqueued).toEqual([
+      { agentId: 'job-search-email', input: validInput, triggerType: 'manual' },
+    ]);
+    expect(rejected.status).toBe(400);
   });
 
   test('accepts valid input asynchronously and reuses an idempotent Job', async () => {

@@ -10,6 +10,6 @@ COPY .github .github
 COPY docs docs
 COPY README.md ./
 
-RUN bun install --frozen-lockfile
+RUN bun --no-env-file install --frozen-lockfile
 
-CMD ["bun", "apps/api/src/index.ts"]
+CMD ["bun", "--no-env-file", "apps/api/src/index.ts"]

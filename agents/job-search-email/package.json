@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@ai-agents/agent-core": "workspace:*"
+    "@ai-agents/agent-core": "workspace:*",
+    "@ai-agents/connector-google": "workspace:*",
+    "@ai-agents/llm": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@ai-agents/testing": "workspace:*"
   }
 }

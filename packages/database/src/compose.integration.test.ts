@@ -7,10 +7,13 @@ const composeEnvironment = {
   API_HOST_PORT: '14000',
   APP_ENV: 'test',
   COMPOSE_PROJECT_NAME: 'ai_agents_pr02_integration',
+  COMPOSE_DISABLE_ENV_FILE: '1',
   GOOGLE_CLIENT_ID: 'compose-client-id',
   GOOGLE_CLIENT_SECRET: 'compose-client-secret',
   GOOGLE_OAUTH_E2E_EMAIL: oauthEmail,
   GOOGLE_REDIRECT_URI: 'http://localhost:14000/auth/google/callback',
+  OPENAI_API_KEY: 'compose-fake-openai-key',
+  OPENAI_ANALYSIS_MODEL: 'compose-fake-model',
   POSTGRES_HOST_PORT: '15432',
   TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
 };
@@ -97,8 +100,8 @@ describe.skipIf(!dockerIntegrationEnabled)('Docker Compose Agent execution', () 
       await waitForStatus('/health/live', 200);
       await waitForStatus('/health/ready', 200);
 
-      compose(['exec', '-T', 'api', 'bun', 'run', 'db:migrate']);
-      compose(['exec', '-T', 'api', 'bun', 'run', 'db:migrate']);
+      compose(['exec', '-T', 'api', 'bun', '--no-env-file', 'run', 'db:migrate']);
+      compose(['exec', '-T', 'api', 'bun', '--no-env-file', 'run', 'db:migrate']);
 
       const oauthStart = await fetch(
         `http://localhost:${composeEnvironment.API_HOST_PORT}/auth/google`,

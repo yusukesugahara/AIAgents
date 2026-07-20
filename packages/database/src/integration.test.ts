@@ -7,6 +7,8 @@ import {
   type DatabaseConnection,
   PostgresAgentRunRepository,
   PostgresGoogleConnectionRepository,
+  PostgresJobEmailAnalysisRepository,
+  PostgresJobEmailReviewRequestRepository,
   PostgresJobQueue,
   PostgresLlmInvocationRepository,
   PostgresOAuthStateRepository,
@@ -32,7 +34,7 @@ const applyMigrationFile = async (
 
 const runMigrations = () => {
   const result = Bun.spawnSync({
-    cmd: ['bun', 'run', '--filter', '@ai-agents/database', 'db:migrate'],
+    cmd: ['bun', '--no-env-file', 'run', '--filter', '@ai-agents/database', 'db:migrate'],
     env: process.env,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -105,7 +107,28 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         expect(rows).toEqual([{ encrypted_refresh_token: 'usable-ciphertext' }]);
         expect(await temporary.isSchemaReady()).toBe(false);
         await applyMigrationFile(temporary, '0007_parched_tana_nile.sql');
+        expect(await temporary.isSchemaReady()).toBe(false);
+        await applyMigrationFile(temporary, '0008_supreme_nemesis.sql');
         expect(await temporary.isSchemaReady()).toBe(true);
+        const constraints = (await temporary.client`
+          SELECT conname
+          FROM pg_constraint
+          WHERE conrelid = 'job_email_analyses'::regclass
+            AND conname LIKE 'job_email_analyses_%_check'
+          ORDER BY conname
+        `) as Array<{ conname: string }>;
+        expect(constraints.map(({ conname }) => conname)).toEqual([
+          'job_email_analyses_category_check',
+          'job_email_analyses_confidence_check',
+          'job_email_analyses_confirmed_category_check',
+          'job_email_analyses_job_category_check',
+          'job_email_analyses_meeting_range_check',
+          'job_email_analyses_meeting_timezone_check',
+          'job_email_analyses_meeting_url_check',
+          'job_email_analyses_reply_intent_check',
+          'job_email_analyses_reply_required_check',
+          'job_email_analyses_url_type_check',
+        ]);
       } finally {
         if (temporary) {
           await temporary.close();
@@ -808,6 +831,174 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
       } finally {
         await connection.client`DELETE FROM agent_runs WHERE id = ${runId}::uuid`;
         await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.close();
+      }
+    });
+
+    test('appends Job Email analyses by Run and creates idempotent review requests', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection);
+      const runs = new PostgresAgentRunRepository(connection);
+      const analyses = new PostgresJobEmailAnalysisRepository(connection);
+      const reviews = new PostgresJobEmailReviewRequestRepository(connection);
+      const idempotencyKey = `analysis-${crypto.randomUUID()}`;
+      const runIdOne = crypto.randomUUID();
+      const runIdTwo = crypto.randomUUID();
+      const runIds = [runIdOne, runIdTwo] as const;
+      const email = `analysis-${crypto.randomUUID()}@example.com`;
+      let connectionId = '';
+
+      try {
+        const [googleConnection] = (await connection.client`
+          WITH inserted_user AS (
+            INSERT INTO users (email) VALUES (${email}) RETURNING id
+          )
+          INSERT INTO connections (
+            user_id, type, google_email, encrypted_refresh_token, granted_scopes, status
+          )
+          SELECT
+            id, 'google', ${email}, 'encrypted-test-token',
+            ARRAY['https://www.googleapis.com/auth/gmail.readonly'], 'connected'
+          FROM inserted_user
+          RETURNING id
+        `) as Array<{ id: string }>;
+        if (!googleConnection) throw new Error('Expected a Google connection');
+        connectionId = googleConnection.id;
+        const job = await queue.enqueue({
+          agentId: 'job-search-email',
+          input: {
+            googleConnectionId: connectionId,
+            gmailMessageId: 'gmail-message-1',
+            gmailThreadId: 'gmail-thread-1',
+          },
+          triggerType: 'manual',
+          idempotencyKey,
+        });
+        for (const runId of runIds) {
+          await runs.startRun({
+            runId,
+            jobId: job.id,
+            agentId: 'job-search-email',
+            triggerType: 'manual',
+            input: {
+              googleConnectionId: connectionId,
+              gmailMessageId: 'gmail-message-1',
+              gmailThreadId: 'gmail-thread-1',
+            },
+            startedAt: new Date(),
+          });
+        }
+
+        for (const [index, runId] of runIds.entries()) {
+          await analyses.saveAnalysis({
+            analysis: {
+              isJobRelated: true,
+              category: 'application_update',
+              companyName: 'Example株式会社',
+              contactName: null,
+              needsReply: false,
+              replyIntent: 'none',
+              missingRequiredInformation: [],
+              meeting: {
+                isConfirmed: false,
+                startAt: null,
+                endAt: null,
+                timezone: null,
+                url: null,
+                urlType: 'none',
+              },
+              confidence: 0.8 + index * 0.1,
+              evidence: [`analysis-${index}`],
+            },
+            googleConnectionId: connectionId,
+            gmailMessageId: 'gmail-message-1',
+            gmailThreadId: 'gmail-thread-1',
+            metadata: {
+              model: `test-model-${index}`,
+              promptVersion: '2026-07-19.v1',
+              schemaName: 'job_email_analysis',
+              schemaVersion: '1',
+            },
+            runId,
+          });
+        }
+        const repeatedAnalysis = {
+          analysis: {
+            isJobRelated: true,
+            category: 'application_update' as const,
+            companyName: 'Example株式会社',
+            contactName: null,
+            needsReply: false,
+            replyIntent: 'none' as const,
+            missingRequiredInformation: [],
+            meeting: {
+              isConfirmed: false,
+              startAt: null,
+              endAt: null,
+              timezone: null,
+              url: null,
+              urlType: 'none' as const,
+            },
+            confidence: 0.9,
+            evidence: ['analysis-1'],
+          },
+          googleConnectionId: connectionId,
+          gmailMessageId: 'gmail-message-1',
+          gmailThreadId: 'gmail-thread-1',
+          metadata: {
+            model: 'test-model-1',
+            promptVersion: '2026-07-19.v1',
+            schemaName: 'job_email_analysis',
+            schemaVersion: '1',
+          },
+          runId: runIdTwo,
+        };
+        await analyses.saveAnalysis(repeatedAnalysis);
+        await expect(
+          analyses.saveAnalysis({
+            ...repeatedAnalysis,
+            metadata: { ...repeatedAnalysis.metadata, model: 'different-model' },
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
+
+        const latest = await analyses.getLatestByMessage({
+          googleConnectionId: connectionId,
+          gmailMessageId: 'gmail-message-1',
+        });
+        expect(latest).toMatchObject({ runId: runIdTwo, metadata: { model: 'test-model-1' } });
+        const countRows = (await connection.client`
+          SELECT COUNT(*)::int AS count FROM job_email_analyses
+          WHERE google_connection_id = ${connectionId}::uuid
+            AND gmail_message_id = 'gmail-message-1'
+        `) as Array<{ count: number }>;
+        expect(countRows[0]?.count).toBe(2);
+
+        const reviewInput = {
+          agentId: 'job-search-email',
+          jobId: job.id,
+          reason: 'llm_refusal' as const,
+          runId: runIdOne,
+        };
+        await reviews.createReviewRequest(reviewInput);
+        await reviews.createReviewRequest(reviewInput);
+        await expect(
+          reviews.createReviewRequest({ ...reviewInput, agentId: 'different-agent' }),
+        ).rejects.toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
+        await expect(
+          reviews.createReviewRequest({ ...reviewInput, reason: 'llm_invalid_output' }),
+        ).rejects.toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
+        const reviewRows = (await connection.client`
+          SELECT COUNT(*)::int AS review_count FROM review_requests
+          WHERE run_id = ${runIdOne}::uuid AND reason = 'llm_refusal'
+        `) as Array<{ review_count: number }>;
+        expect(reviewRows[0]?.review_count).toBe(1);
+      } finally {
+        if (connectionId) {
+          await connection.client`DELETE FROM connections WHERE id = ${connectionId}::uuid`;
+        }
+        await connection.client`DELETE FROM agent_runs WHERE id IN (${runIdOne}::uuid, ${runIdTwo}::uuid)`;
+        await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.client`DELETE FROM users WHERE email = ${email}`;
         await connection.close();
       }
     });

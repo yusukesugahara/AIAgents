@@ -7,6 +7,25 @@ export interface JobRuntimeConfig {
   readonly pollIntervalMs: number;
 }
 
+export interface JobEmailAnalysisRuntimeConfig {
+  readonly openAiApiKey: string;
+  readonly openAiModel: string;
+}
+
+export function loadJobEmailAnalysisRuntimeConfig(
+  environment = process.env,
+): JobEmailAnalysisRuntimeConfig {
+  const openAiApiKey = environment.OPENAI_API_KEY?.trim();
+  const openAiModel = environment.OPENAI_ANALYSIS_MODEL?.trim();
+  if (!openAiApiKey) {
+    throw new Error('OPENAI_API_KEY is required by the Job Search Email Agent');
+  }
+  if (!openAiModel) {
+    throw new Error('OPENAI_ANALYSIS_MODEL is required by the Job Search Email Agent');
+  }
+  return { openAiApiKey, openAiModel };
+}
+
 export function loadJobRuntimeConfig(environment = process.env): JobRuntimeConfig {
   const lockTimeoutSeconds = readPositiveInteger(
     environment.AGENT_JOB_LOCK_TIMEOUT_SECONDS,

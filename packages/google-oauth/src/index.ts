@@ -42,6 +42,11 @@ export interface GoogleOAuthConfig {
   readonly tokenEncryptionKey: string;
 }
 
+export type GoogleAccessTokenConfig = Pick<
+  GoogleOAuthConfig,
+  'clientId' | 'clientSecret' | 'tokenEncryptionKey'
+>;
+
 export interface GoogleAuthorizationRequest {
   readonly codeChallenge: string;
   readonly state: string;
@@ -696,13 +701,11 @@ export class HttpGoogleTokenRefresher implements GoogleTokenRefresher {
 }
 
 export function loadGoogleOAuthConfig(environment = process.env): GoogleOAuthConfig {
-  const clientId = environment.GOOGLE_CLIENT_ID?.trim();
-  const clientSecret = environment.GOOGLE_CLIENT_SECRET?.trim();
   const redirectUri = environment.GOOGLE_REDIRECT_URI?.trim();
-  const tokenEncryptionKey = environment.TOKEN_ENCRYPTION_KEY?.trim();
-  if (!clientId || !clientSecret || !redirectUri || !tokenEncryptionKey) {
+  if (!redirectUri) {
     throw new GoogleOAuthError('OAUTH_CONFIGURATION_INVALID', 'Google OAuth is not configured');
   }
+  const accessTokenConfig = loadGoogleAccessTokenConfig(environment);
   try {
     const parsedRedirectUri = new URL(redirectUri);
     if (
@@ -723,8 +726,21 @@ export function loadGoogleOAuthConfig(environment = process.env): GoogleOAuthCon
       'GOOGLE_REDIRECT_URI must use HTTPS, or HTTP on localhost, without credentials or a fragment',
     );
   }
+  return { ...accessTokenConfig, redirectUri };
+}
+
+export function loadGoogleAccessTokenConfig(environment = process.env): GoogleAccessTokenConfig {
+  const clientId = environment.GOOGLE_CLIENT_ID?.trim();
+  const clientSecret = environment.GOOGLE_CLIENT_SECRET?.trim();
+  const tokenEncryptionKey = environment.TOKEN_ENCRYPTION_KEY?.trim();
+  if (!clientId || !clientSecret || !tokenEncryptionKey) {
+    throw new GoogleOAuthError(
+      'OAUTH_CONFIGURATION_INVALID',
+      'Google access token service is not configured',
+    );
+  }
   AesGcmTokenCipher.fromBase64Key(tokenEncryptionKey);
-  return { clientId, clientSecret, redirectUri, tokenEncryptionKey };
+  return { clientId, clientSecret, tokenEncryptionKey };
 }
 
 function isValidEmail(value: string): boolean {

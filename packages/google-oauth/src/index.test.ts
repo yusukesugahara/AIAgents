@@ -15,6 +15,7 @@ import {
   type GoogleTokenSet,
   HttpGoogleOAuthProvider,
   HttpGoogleTokenRefresher,
+  loadGoogleAccessTokenConfig,
   loadGoogleOAuthConfig,
   type OAuthStateRecord,
   type OAuthStateRepository,
@@ -315,6 +316,20 @@ describe('Google OAuth', () => {
     expect(url.searchParams.get('scope')).toContain(
       'https://www.googleapis.com/auth/gmail.readonly',
     );
+  });
+
+  test('loads background token configuration without requiring an OAuth redirect URI', () => {
+    expect(
+      loadGoogleAccessTokenConfig({
+        GOOGLE_CLIENT_ID: 'client-id',
+        GOOGLE_CLIENT_SECRET: 'client-secret',
+        TOKEN_ENCRYPTION_KEY: encryptionKey,
+      }),
+    ).toEqual({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      tokenEncryptionKey: encryptionKey,
+    });
   });
 
   test('maps Google network failures to a safe provider error', async () => {

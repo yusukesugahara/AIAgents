@@ -1,6 +1,7 @@
 import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -192,25 +193,113 @@ export const agentErrors = pgTable(
   (table) => [index('agent_errors_run_id_occurred_at_idx').on(table.runId, table.occurredAt)],
 );
 
-export const reviewRequests = pgTable('review_requests', {
-  id: uuid('id').primaryKey().default(sql`uuidv7()`),
-  agentId: text('agent_id').notNull(),
-  jobId: uuid('job_id').references(() => agentJobs.id, { onDelete: 'set null' }),
-  status: text('status').notNull().default('pending'),
-  reason: text('reason').notNull().default('manual'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
-});
+export const reviewRequests = pgTable(
+  'review_requests',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    agentId: text('agent_id').notNull(),
+    jobId: uuid('job_id').references(() => agentJobs.id, { onDelete: 'set null' }),
+    runId: uuid('run_id').references(() => agentRuns.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'),
+    reason: text('reason').notNull().default('manual'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+  },
+  (table) => [uniqueIndex('review_requests_run_id_unique').on(table.runId)],
+);
+
+export const jobEmailAnalyses = pgTable(
+  'job_email_analyses',
+  {
+    id: uuid('id').primaryKey().default(sql`uuidv7()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: 'cascade' }),
+    googleConnectionId: uuid('google_connection_id')
+      .notNull()
+      .references(() => connections.id, { onDelete: 'cascade' }),
+    gmailMessageId: text('gmail_message_id').notNull(),
+    gmailThreadId: text('gmail_thread_id').notNull(),
+    isJobRelated: boolean('is_job_related').notNull(),
+    category: text('category').notNull(),
+    needsReply: boolean('needs_reply').notNull(),
+    replyIntent: text('reply_intent').notNull(),
+    companyName: text('company_name'),
+    contactName: text('contact_name'),
+    meetingIsConfirmed: boolean('meeting_is_confirmed').notNull(),
+    meetingStartAt: timestamp('meeting_start_at', { withTimezone: true }),
+    meetingEndAt: timestamp('meeting_end_at', { withTimezone: true }),
+    meetingTimezone: text('meeting_timezone'),
+    meetingUrl: text('meeting_url'),
+    meetingUrlType: text('meeting_url_type').notNull(),
+    confidence: numeric('confidence', { precision: 5, scale: 4 }).notNull(),
+    analysisJson: jsonb('analysis_json').notNull(),
+    model: text('model').notNull(),
+    promptVersion: text('prompt_version').notNull(),
+    schemaName: text('schema_name').notNull(),
+    schemaVersion: text('schema_version').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('job_email_analyses_run_id_unique').on(table.runId),
+    index('job_email_analyses_connection_message_created_idx').on(
+      table.googleConnectionId,
+      table.gmailMessageId,
+      table.createdAt,
+    ),
+    check(
+      'job_email_analyses_category_check',
+      sql`${table.category} IN ('meeting_confirmed', 'scheduling_request', 'application_update', 'document_request', 'assignment', 'offer', 'rejection', 'general', 'not_job_related')`,
+    ),
+    check(
+      'job_email_analyses_reply_intent_check',
+      sql`${table.replyIntent} IN ('accept', 'decline', 'acknowledge', 'submit_information', 'request_clarification', 'none')`,
+    ),
+    check(
+      'job_email_analyses_url_type_check',
+      sql`${table.meetingUrlType} IN ('web_meeting', 'scheduling_page', 'other', 'none')`,
+    ),
+    check(
+      'job_email_analyses_confidence_check',
+      sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+    ),
+    check(
+      'job_email_analyses_job_category_check',
+      sql`${table.isJobRelated} = (${table.category} <> 'not_job_related')`,
+    ),
+    check(
+      'job_email_analyses_reply_required_check',
+      sql`${table.needsReply} = (${table.replyIntent} <> 'none')`,
+    ),
+    check(
+      'job_email_analyses_confirmed_category_check',
+      sql`${table.meetingIsConfirmed} = (${table.category} = 'meeting_confirmed')`,
+    ),
+    check(
+      'job_email_analyses_meeting_range_check',
+      sql`${table.meetingEndAt} IS NULL OR (${table.meetingStartAt} IS NOT NULL AND ${table.meetingEndAt} > ${table.meetingStartAt})`,
+    ),
+    check(
+      'job_email_analyses_meeting_timezone_check',
+      sql`(${table.meetingStartAt} IS NULL) = (${table.meetingTimezone} IS NULL)`,
+    ),
+    check(
+      'job_email_analyses_meeting_url_check',
+      sql`(${table.meetingUrl} IS NULL) = (${table.meetingUrlType} = 'none')`,
+    ),
+  ],
+);
 
 export const usersRelations = relations(users, ({ many }) => ({
   connections: many(connections),
 }));
 
-export const connectionsRelations = relations(connections, ({ one }) => ({
+export const connectionsRelations = relations(connections, ({ one, many }) => ({
   user: one(users, {
     fields: [connections.userId],
     references: [users.id],
   }),
+  jobEmailAnalyses: many(jobEmailAnalyses),
 }));
 
 export const agentJobsRelations = relations(agentJobs, ({ many }) => ({
@@ -224,6 +313,8 @@ export const agentRunsRelations = relations(agentRuns, ({ one, many }) => ({
   }),
   steps: many(agentRunSteps),
   llmInvocations: many(llmInvocations),
+  jobEmailAnalyses: many(jobEmailAnalyses),
+  reviewRequests: many(reviewRequests),
 }));
 
 export const agentRunStepsRelations = relations(agentRunSteps, ({ one }) => ({
@@ -236,6 +327,24 @@ export const agentRunStepsRelations = relations(agentRunSteps, ({ one }) => ({
 export const llmInvocationsRelations = relations(llmInvocations, ({ one }) => ({
   run: one(agentRuns, {
     fields: [llmInvocations.runId],
+    references: [agentRuns.id],
+  }),
+}));
+
+export const jobEmailAnalysesRelations = relations(jobEmailAnalyses, ({ one }) => ({
+  connection: one(connections, {
+    fields: [jobEmailAnalyses.googleConnectionId],
+    references: [connections.id],
+  }),
+  run: one(agentRuns, {
+    fields: [jobEmailAnalyses.runId],
+    references: [agentRuns.id],
+  }),
+}));
+
+export const reviewRequestsRelations = relations(reviewRequests, ({ one }) => ({
+  run: one(agentRuns, {
+    fields: [reviewRequests.runId],
     references: [agentRuns.id],
   }),
 }));

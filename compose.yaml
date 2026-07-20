@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    command: bun run --filter @ai-agents/database db:migrate
+    command: bun --no-env-file run --filter @ai-agents/database db:migrate
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
     depends_on:
@@ -14,12 +14,9 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    command: bun apps/api/src/index.ts
+    command: bun --no-env-file apps/api/src/index.ts
     ports:
       - "${API_HOST_PORT:-4000}:4000"
-    env_file:
-      - path: .env
-        required: false
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
       - APP_PORT=4000
@@ -36,13 +33,16 @@ services:
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
-    command: bun apps/worker/src/index.ts
-    env_file:
-      - path: .env
-        required: false
+    command: bun --no-env-file apps/worker/src/index.ts
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
       - APP_ENV=${APP_ENV:-development}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_ANALYSIS_MODEL=${OPENAI_ANALYSIS_MODEL:-}
     depends_on:
       migrate:
         condition: service_completed_successfully

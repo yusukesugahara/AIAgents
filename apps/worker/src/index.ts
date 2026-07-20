@@ -1,16 +1,31 @@
 import { createRuntimeAgentRegistry } from '@ai-agents/agent-composition';
 import { AgentRunner } from '@ai-agents/agent-core';
-import { loadJobRuntimeConfig } from '@ai-agents/config';
+import { loadJobEmailAnalysisRuntimeConfig, loadJobRuntimeConfig } from '@ai-agents/config';
+import { HttpGmailReader } from '@ai-agents/connector-google';
 import {
   createDatabaseConnection,
   type DatabaseConnection,
   PostgresAgentRunRepository,
+  PostgresGoogleConnectionRepository,
+  PostgresJobEmailAnalysisRepository,
+  PostgresJobEmailReviewRequestRepository,
   PostgresJobQueue,
+  PostgresLlmInvocationRepository,
 } from '@ai-agents/database';
+import {
+  AesGcmTokenCipher,
+  GoogleAccessTokenService,
+  HttpGoogleTokenRefresher,
+  loadGoogleAccessTokenConfig,
+} from '@ai-agents/google-oauth';
+import { createJobSearchEmailAgent } from '@ai-agents/job-search-email';
+import { OpenAiLlmProvider } from '@ai-agents/llm';
 import { startWorker } from './worker';
 
 let database: DatabaseConnection | undefined;
 const jobRuntimeConfig = loadJobRuntimeConfig();
+const analysisRuntimeConfig = loadJobEmailAnalysisRuntimeConfig();
+const googleAccessTokenConfig = loadGoogleAccessTokenConfig();
 
 try {
   database = createDatabaseConnection();
@@ -27,6 +42,23 @@ if (!database) {
   throw new Error('Worker requires a configured DATABASE_URL');
 }
 
+const googleConnections = new PostgresGoogleConnectionRepository(database);
+const accessTokens = new GoogleAccessTokenService({
+  cipher: AesGcmTokenCipher.fromBase64Key(googleAccessTokenConfig.tokenEncryptionKey),
+  credentials: googleConnections,
+  refresher: new HttpGoogleTokenRefresher(googleAccessTokenConfig),
+});
+const jobSearchEmailAgent = createJobSearchEmailAgent({
+  analyses: new PostgresJobEmailAnalysisRepository(database),
+  gmail: new HttpGmailReader({ accessTokens }),
+  llm: new OpenAiLlmProvider({
+    apiKey: analysisRuntimeConfig.openAiApiKey,
+    invocationRepository: new PostgresLlmInvocationRepository(database),
+  }),
+  model: analysisRuntimeConfig.openAiModel,
+  reviews: new PostgresJobEmailReviewRequestRepository(database),
+});
+
 const worker = await startWorker({
   database,
   leaseHeartbeatIntervalMs: jobRuntimeConfig.leaseHeartbeatIntervalMs,
@@ -34,7 +66,10 @@ const worker = await startWorker({
   pollIntervalMs: jobRuntimeConfig.pollIntervalMs,
   queue: new PostgresJobQueue(database, jobRuntimeConfig),
   runner: new AgentRunner({
-    registry: createRuntimeAgentRegistry(),
+    registry: createRuntimeAgentRegistry({
+      environment: process.env.APP_ENV,
+      jobSearchEmailAgent,
+    }),
     repository: new PostgresAgentRunRepository(database),
   }),
 });

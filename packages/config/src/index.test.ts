@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { loadJobRuntimeConfig } from './index';
+import { loadJobEmailAnalysisRuntimeConfig, loadJobRuntimeConfig } from './index';
 
 describe('Job runtime configuration', () => {
   test('uses the documented defaults', () => {
@@ -19,5 +19,20 @@ describe('Job runtime configuration', () => {
         AGENT_JOB_LOCK_TIMEOUT_SECONDS: '60',
       }),
     ).toThrow('AGENT_JOB_LEASE_HEARTBEAT_MS must be shorter than the lock timeout');
+  });
+});
+
+describe('Job Search Email runtime configuration', () => {
+  test('requires an explicitly injected OpenAI key and analysis model', () => {
+    expect(() => loadJobEmailAnalysisRuntimeConfig({})).toThrow('OPENAI_API_KEY is required');
+    expect(() => loadJobEmailAnalysisRuntimeConfig({ OPENAI_API_KEY: 'test-key' })).toThrow(
+      'OPENAI_ANALYSIS_MODEL is required',
+    );
+    expect(
+      loadJobEmailAnalysisRuntimeConfig({
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_ANALYSIS_MODEL: 'test-model',
+      }),
+    ).toEqual({ openAiApiKey: 'test-key', openAiModel: 'test-model' });
   });
 });

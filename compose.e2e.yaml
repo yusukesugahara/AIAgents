@@ -1,5 +1,5 @@
 services:
   api:
-    command: bun apps/api/src/e2e-index.ts
+    command: bun --no-env-file apps/api/src/e2e-index.ts
     environment:
       - GOOGLE_OAUTH_E2E_EMAIL=${GOOGLE_OAUTH_E2E_EMAIL:?GOOGLE_OAUTH_E2E_EMAIL is required}

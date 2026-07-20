@@ -4,12 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run src/index.ts"
+    "start": "bun --no-env-file run src/index.ts"
   },
   "dependencies": {
     "@ai-agents/agent-core": "workspace:*",
     "@ai-agents/agent-composition": "workspace:*",
     "@ai-agents/config": "workspace:*",
-    "@ai-agents/database": "workspace:*"
+    "@ai-agents/connector-google": "workspace:*",
+    "@ai-agents/database": "workspace:*",
+    "@ai-agents/google-oauth": "workspace:*",
+    "@ai-agents/job-search-email": "workspace:*",
+    "@ai-agents/llm": "workspace:*"
   }
 }

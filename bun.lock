@@ -30,6 +30,12 @@
       "version": "0.1.0",
       "dependencies": {
         "@ai-agents/agent-core": "workspace:*",
+        "@ai-agents/connector-google": "workspace:*",
+        "@ai-agents/llm": "workspace:*",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "@ai-agents/testing": "workspace:*",
       },
     },
     "apps/api": {
@@ -52,7 +58,11 @@
         "@ai-agents/agent-composition": "workspace:*",
         "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/config": "workspace:*",
+        "@ai-agents/connector-google": "workspace:*",
         "@ai-agents/database": "workspace:*",
+        "@ai-agents/google-oauth": "workspace:*",
+        "@ai-agents/job-search-email": "workspace:*",
+        "@ai-agents/llm": "workspace:*",
       },
     },
     "packages/agent-composition": {
@@ -61,6 +71,7 @@
       "dependencies": {
         "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/echo-agent": "workspace:*",
+        "@ai-agents/job-search-email": "workspace:*",
       },
     },
     "packages/agent-core": {
@@ -89,6 +100,7 @@
       "dependencies": {
         "@ai-agents/agent-core": "workspace:*",
         "@ai-agents/google-oauth": "workspace:*",
+        "@ai-agents/job-search-email": "workspace:*",
         "@ai-agents/llm": "workspace:*",
         "drizzle-orm": "^0.44.4",
         "postgres": "^3.4.7",

@@ -53,9 +53,19 @@ export function createDatabaseConnection(
           AND to_regclass('public.agent_runs') IS NOT NULL
           AND to_regclass('public.agent_errors') IS NOT NULL
           AND to_regclass('public.llm_invocations') IS NOT NULL
+          AND to_regclass('public.job_email_analyses') IS NOT NULL
+          AND to_regclass('public.review_requests_run_id_unique') IS NOT NULL
           AND to_regclass('public.oauth_authorization_states') IS NOT NULL
           AND to_regclass('public.agent_jobs_agent_id_idempotency_key_unique') IS NOT NULL
           AND to_regclass('public.connections_user_id_type_google_email_unique') IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'job_email_analyses'
+              AND column_name = 'meeting_url_type'
+              AND is_nullable = 'NO'
+          )
           AND EXISTS (
             SELECT 1
             FROM information_schema.columns

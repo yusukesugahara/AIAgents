@@ -15,6 +15,7 @@
     "baseUrl": ".",
     "paths": {
       "@ai-agents/echo-agent": ["agents/echo/src/index.ts"],
+      "@ai-agents/job-search-email": ["agents/job-search-email/src/index.ts"],
       "@ai-agents/*": ["packages/*/src/index.ts"]
     }
   },

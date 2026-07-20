@@ -9,16 +9,16 @@
 必要環境は Bun 1.3.14 です。
 
 ```bash
-bun install
-bun run typecheck
-bun run lint
-bun test
+bun --no-env-file install
+bun --no-env-file run typecheck
+bun --no-env-file run lint
+bun --no-env-file test
 ```
 
 開発用 API は次で起動します。
 
 ```bash
-APP_ENV=development bun --filter @ai-agents/api start
+APP_ENV=development bun --no-env-file --filter @ai-agents/api start
 ```
 
 PostgreSQL ベースの基盤実装では、次のヘルスチェックを利用できます。
@@ -55,9 +55,13 @@ OS／CIの環境変数へClient ID、Client Secret、および`openssl rand -bas
 `OPENAI_API_KEY`は`.env`ではなくOS／CIの環境変数から実行プロセスへ渡してください。モデル名は呼び出し側が指定し、
 モデル、Prompt版、Schema版、Token使用量、推定コストのみを`llm_invocations`へ保存します。Prompt、メール本文、生成結果本文は保存しません。
 
+`job-search-email` AgentはGmailのMessage／Thread IDを受け取り、就活メール分類、返信要否、面談情報と短い根拠を構造化して
+`job_email_analyses`へRun単位で追記します。`OPENAI_ANALYSIS_MODEL`が未設定の場合、Workerは起動しません。
+LLM拒否または構造不正時は本文を保存せず、Runと結び付いた`review_requests`を作成します。
+
 DB Integration TestとDocker Compose全体のIntegration Testは、それぞれ次で実行します。
 
 ```bash
-bun run test:integration:database
-bun run test:integration:docker
+bun --no-env-file run test:integration:database
+bun --no-env-file run test:integration:docker
 ```

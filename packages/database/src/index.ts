@@ -8,6 +8,10 @@ export {
   PostgresGoogleConnectionRepository,
   PostgresOAuthStateRepository,
 } from './postgres-google-oauth';
+export {
+  PostgresJobEmailAnalysisRepository,
+  PostgresJobEmailReviewRequestRepository,
+} from './postgres-job-email-analysis';
 export type { PostgresJobQueueOptions } from './postgres-job-queue';
 export { PostgresAgentRunRepository, PostgresJobQueue } from './postgres-job-queue';
 export { PostgresLlmInvocationRepository } from './postgres-llm-invocation';

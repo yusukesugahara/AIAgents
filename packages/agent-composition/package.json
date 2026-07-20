@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@ai-agents/agent-core": "workspace:*",
-    "@ai-agents/echo-agent": "workspace:*"
+    "@ai-agents/echo-agent": "workspace:*",
+    "@ai-agents/job-search-email": "workspace:*"
   }
 }
