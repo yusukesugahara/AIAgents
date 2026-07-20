@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { AgentDependencyError } from '@ai-agents/agent-core';
-import type { GoogleAccessTokenProvider } from '@ai-agents/google-oauth';
+import { type GoogleAccessTokenProvider, gmailComposeScope } from '@ai-agents/google-oauth';
 import { z } from 'zod';
 
 const gmailApiBaseUrl = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -26,6 +27,7 @@ export interface EmailMessage {
   readonly sentAt: Date;
   readonly messageId: string | null;
   readonly inReplyTo: string | null;
+  readonly replyTo: string | null;
   readonly references: readonly string[];
   readonly bodyText: string;
   readonly bodyTruncated: boolean;
@@ -53,9 +55,41 @@ export interface GmailReader {
   }): Promise<EmailThread>;
 }
 
+export interface CreatedGmailDraft {
+  readonly draftId: string;
+  readonly messageId: string;
+  readonly threadId: string;
+}
+
+export interface GmailDraftWriter {
+  createReplyDraft(input: CreateReplyDraftInput): Promise<CreatedGmailDraft>;
+  findReplyDraft(input: FindReplyDraftInput): Promise<CreatedGmailDraft | null>;
+}
+
+export interface CreateReplyDraftInput extends FindReplyDraftInput {
+  readonly body: string;
+  readonly from: string;
+  readonly inReplyTo: string;
+  readonly references: readonly string[];
+  readonly subject: string;
+  readonly to: string;
+}
+
+export interface FindReplyDraftInput {
+  readonly googleConnectionId: string;
+  readonly gmailThreadId: string;
+  readonly idempotencyKey: string;
+}
+
 export interface HttpGmailReaderOptions {
   readonly accessTokens: GoogleAccessTokenProvider;
   readonly bodyLimitBytes?: number;
+  readonly fetchImplementation?: FetchImplementation;
+  readonly timeoutMs?: number;
+}
+
+export interface HttpGmailDraftWriterOptions {
+  readonly accessTokens: GoogleAccessTokenProvider;
   readonly fetchImplementation?: FetchImplementation;
   readonly timeoutMs?: number;
 }
@@ -98,6 +132,15 @@ const threadSchema = z
   .object({ id: z.string().min(1), messages: z.array(messageSchema).optional() })
   .passthrough();
 const attachmentSchema = z.object({ data: z.string().min(1) }).passthrough();
+const draftSchema = z
+  .object({
+    id: z.string().min(1),
+    message: z.object({ id: z.string().min(1), threadId: z.string().min(1) }),
+  })
+  .passthrough();
+const draftListSchema = z
+  .object({ drafts: z.array(draftSchema).optional(), nextPageToken: z.string().optional() })
+  .passthrough();
 
 type RawMessage = z.infer<typeof messageSchema>;
 type RawMessagePart = {
@@ -207,7 +250,9 @@ export class HttpGmailReader implements GmailReader {
     connectionId: string,
     request: (accessToken: string) => Promise<T>,
   ): Promise<T> {
-    let accessToken = await this.options.accessTokens.getAccessToken(connectionId);
+    let accessToken = await this.options.accessTokens.getAccessToken(connectionId, [
+      'https://www.googleapis.com/auth/gmail.readonly',
+    ]);
     try {
       return await request(accessToken);
     } catch (error) {
@@ -215,7 +260,9 @@ export class HttpGmailReader implements GmailReader {
         throw error;
       }
       this.options.accessTokens.invalidateAccessToken(connectionId);
-      accessToken = await this.options.accessTokens.getAccessToken(connectionId);
+      accessToken = await this.options.accessTokens.getAccessToken(connectionId, [
+        'https://www.googleapis.com/auth/gmail.readonly',
+      ]);
       try {
         return await request(accessToken);
       } catch (retryError) {
@@ -264,6 +311,7 @@ export class HttpGmailReader implements GmailReader {
       sentAt,
       messageId: headers.get('message-id') ?? null,
       inReplyTo: headers.get('in-reply-to') ?? null,
+      replyTo: headers.get('reply-to') ?? null,
       references: (headers.get('references') ?? '').split(/\s+/u).filter(Boolean),
       bodyText: body.text,
       bodyTruncated: body.truncated,
@@ -373,6 +421,225 @@ export class HttpGmailReader implements GmailReader {
       clearTimeout(timeout);
     }
   }
+}
+
+/** Creates and recovers unsent Gmail reply drafts. It deliberately has no send operation. */
+export class HttpGmailDraftWriter implements GmailDraftWriter {
+  readonly #fetch: FetchImplementation;
+  readonly #timeoutMs: number;
+
+  constructor(private readonly options: HttpGmailDraftWriterOptions) {
+    this.#fetch = options.fetchImplementation ?? fetch;
+    this.#timeoutMs = options.timeoutMs ?? 10_000;
+    if (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs <= 0) {
+      throw new Error('Gmail timeout must be a positive integer');
+    }
+  }
+
+  async findReplyDraft(input: FindReplyDraftInput): Promise<CreatedGmailDraft | null> {
+    validateDraftReference(input);
+    const messageId = deterministicDraftMessageId(input.idempotencyKey);
+    return this.#withAccessToken(input.googleConnectionId, async (accessToken) => {
+      const url = new URL(`${gmailApiBaseUrl}/drafts`);
+      url.searchParams.set('q', `rfc822msgid:${messageId}`);
+      url.searchParams.set('maxResults', '10');
+      const body = parseGmailResponse(draftListSchema, await this.#requestJson(url, accessToken));
+      const found = (body.drafts ?? []).find(
+        (draft) => draft.message.threadId === input.gmailThreadId,
+      );
+      return found
+        ? { draftId: found.id, messageId: found.message.id, threadId: found.message.threadId }
+        : null;
+    });
+  }
+
+  async createReplyDraft(input: CreateReplyDraftInput): Promise<CreatedGmailDraft> {
+    validateDraftReference(input);
+    const raw = createReplyMime(input);
+    return this.#withAccessToken(input.googleConnectionId, async (accessToken) => {
+      const body = parseGmailResponse(
+        draftSchema,
+        await this.#requestJson(new URL(`${gmailApiBaseUrl}/drafts`), accessToken, 'POST', {
+          message: { raw, threadId: input.gmailThreadId },
+        }),
+      );
+      if (body.message.threadId !== input.gmailThreadId) {
+        throw new AgentDependencyError(
+          'INVALID_RESPONSE',
+          false,
+          'Gmail created a Draft in another Thread',
+        );
+      }
+      return { draftId: body.id, messageId: body.message.id, threadId: body.message.threadId };
+    });
+  }
+
+  async #withAccessToken<T>(
+    connectionId: string,
+    request: (accessToken: string) => Promise<T>,
+  ): Promise<T> {
+    let accessToken = await this.options.accessTokens.getAccessToken(connectionId, [
+      gmailComposeScope,
+    ]);
+    try {
+      return await request(accessToken);
+    } catch (error) {
+      if (!(error instanceof GmailHttpStatusError) || error.status !== 401) throw error;
+      this.options.accessTokens.invalidateAccessToken(connectionId);
+      accessToken = await this.options.accessTokens.getAccessToken(connectionId, [
+        gmailComposeScope,
+      ]);
+      try {
+        return await request(accessToken);
+      } catch (retryError) {
+        if (retryError instanceof GmailHttpStatusError && retryError.status === 401) {
+          throw new AgentDependencyError(
+            'AUTHENTICATION_REQUIRED',
+            false,
+            'Google access token was rejected',
+          );
+        }
+        throw retryError;
+      }
+    }
+  }
+
+  async #requestJson(
+    url: URL,
+    accessToken: string,
+    method = 'GET',
+    payload?: unknown,
+  ): Promise<unknown> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
+    try {
+      const response = await this.#fetch(url, {
+        method,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          ...(payload ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(payload ? { body: JSON.stringify(payload) } : {}),
+        signal: controller.signal,
+      });
+      const body = (await response.json().catch(() => null)) as unknown;
+      if (response.status === 401) throw new GmailHttpStatusError(401);
+      if (!response.ok) throw toGmailError(response.status, body);
+      if (body === null)
+        throw new AgentDependencyError(
+          'INVALID_RESPONSE',
+          false,
+          'Gmail returned an invalid response',
+        );
+      return body;
+    } catch (error) {
+      if (error instanceof AgentDependencyError || error instanceof GmailHttpStatusError)
+        throw error;
+      throw new AgentDependencyError(
+        'TEMPORARY_UNAVAILABLE',
+        true,
+        'Gmail service is temporarily unavailable',
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+export function deterministicDraftMessageId(idempotencyKey: string): string {
+  requireIdentifier(idempotencyKey, 'Draft idempotency key');
+  return `<${createHash('sha256').update(idempotencyKey).digest('hex')}@ai-agents.invalid>`;
+}
+
+export function createReplyMime(
+  input: Omit<CreateReplyDraftInput, 'googleConnectionId' | 'gmailThreadId'>,
+): string {
+  for (const [name, value] of Object.entries({
+    From: input.from,
+    To: input.to,
+    Subject: input.subject,
+    'In-Reply-To': input.inReplyTo,
+  })) {
+    if (!value.trim() || /[\r\n]/u.test(value)) {
+      throw new AgentDependencyError('INVALID_REQUEST', false, `Gmail Draft ${name} is invalid`);
+    }
+  }
+  if (!input.body.trim() || Buffer.byteLength(input.body, 'utf8') > 16 * 1024) {
+    throw new AgentDependencyError('INVALID_REQUEST', false, 'Gmail Draft body is invalid');
+  }
+  const references = [...new Set(input.references.filter(isValidMessageId))].slice(-20);
+  if (!isValidMessageId(input.inReplyTo)) {
+    throw new AgentDependencyError('INVALID_REQUEST', false, 'Gmail Draft In-Reply-To is invalid');
+  }
+  if (!references.includes(input.inReplyTo)) references.push(input.inReplyTo);
+  const encodedSubject = encodeMimeHeader(input.subject);
+  const encodedBody = Buffer.from(input.body.replace(/\r?\n/gu, '\r\n'), 'utf8')
+    .toString('base64')
+    .replace(/(.{76})/gu, '$1\r\n');
+  const message = [
+    `From: ${input.from}`,
+    `To: ${input.to}`,
+    `Subject: ${encodedSubject}`,
+    `In-Reply-To: ${input.inReplyTo}`,
+    `References: ${foldMessageIds(references)}`,
+    `Message-ID: ${deterministicDraftMessageId(input.idempotencyKey)}`,
+    `X-AI-Agents-Draft-Key: ${createHash('sha256').update(input.idempotencyKey).digest('base64url')}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    encodedBody,
+  ].join('\r\n');
+  return Buffer.from(message, 'utf8').toString('base64url');
+}
+
+function validateDraftReference(input: FindReplyDraftInput): void {
+  requireUuid(input.googleConnectionId);
+  requireIdentifier(input.gmailThreadId, 'Gmail thread ID');
+  requireIdentifier(input.idempotencyKey, 'Draft idempotency key');
+}
+
+function isValidMessageId(value: string): boolean {
+  return /^<[^<>\r\n]+>$/u.test(value) && Buffer.byteLength(value, 'utf8') <= 512;
+}
+
+function foldMessageIds(messageIds: readonly string[]): string {
+  const lines: string[] = [];
+  let line = '';
+  for (const messageId of messageIds) {
+    const candidate = line ? `${line} ${messageId}` : messageId;
+    if (line && Buffer.byteLength(candidate, 'utf8') > 900) {
+      lines.push(line);
+      line = messageId;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.join('\r\n ');
+}
+
+function encodeMimeHeader(value: string): string {
+  if (/^[\x20-\x7e]*$/u.test(value) && value.length <= 75) return value;
+  const maximumEncodedWordBytes = 45;
+  const chunks: string[] = [];
+  let chunk = '';
+  let chunkBytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (chunk && chunkBytes + characterBytes > maximumEncodedWordBytes) {
+      chunks.push(chunk);
+      chunk = '';
+      chunkBytes = 0;
+    }
+    chunk += character;
+    chunkBytes += characterBytes;
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks
+    .map((part) => `=?UTF-8?B?${Buffer.from(part, 'utf8').toString('base64')}?=`)
+    .join('\r\n ');
 }
 
 class GmailHttpStatusError extends Error {

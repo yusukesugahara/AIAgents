@@ -8,7 +8,9 @@ import {
   PostgresAgentRunRepository,
   PostgresGoogleConnectionRepository,
   PostgresJobEmailAnalysisRepository,
+  PostgresJobEmailDraftRepository,
   PostgresJobEmailReviewRequestRepository,
+  PostgresJobEmailSettingsRepository,
   PostgresJobQueue,
   PostgresLlmInvocationRepository,
   PostgresOAuthStateRepository,
@@ -109,7 +111,22 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         await applyMigrationFile(temporary, '0007_parched_tana_nile.sql');
         expect(await temporary.isSchemaReady()).toBe(false);
         await applyMigrationFile(temporary, '0008_supreme_nemesis.sql');
+        await temporary.client`
+          INSERT INTO agent_settings (user_id, agent_id, settings_json, updated_at)
+          VALUES
+            (${user.id}::uuid, 'job-search-email', '{"userName":"older"}'::jsonb, NOW() - INTERVAL '1 day'),
+            (${user.id}::uuid, 'job-search-email', '{"userName":"newer"}'::jsonb, NOW())
+        `;
+        expect(await temporary.isSchemaReady()).toBe(false);
+        await applyMigrationFile(temporary, '0009_stiff_nuke.sql');
         expect(await temporary.isSchemaReady()).toBe(true);
+        const settings = (await temporary.client`
+          SELECT settings_json
+          FROM agent_settings
+          WHERE user_id = ${user.id}::uuid
+            AND agent_id = 'job-search-email'
+        `) as Array<{ settings_json: { userName: string } }>;
+        expect(settings).toEqual([{ settings_json: { userName: 'newer' } }]);
         const constraints = (await temporary.client`
           SELECT conname
           FROM pg_constraint
@@ -998,6 +1015,201 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         }
         await connection.client`DELETE FROM agent_runs WHERE id IN (${runIdOne}::uuid, ${runIdTwo}::uuid)`;
         await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.client`DELETE FROM users WHERE email = ${email}`;
+        await connection.close();
+      }
+    });
+
+    test('reserves and completes an idempotent Job Email Draft with its reply settings', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection);
+      const runs = new PostgresAgentRunRepository(connection);
+      const drafts = new PostgresJobEmailDraftRepository(connection);
+      const settings = new PostgresJobEmailSettingsRepository(connection);
+      const email = `draft-${crypto.randomUUID()}@example.com`;
+      const idempotencyKey = `draft-${crypto.randomUUID()}`;
+      const runId = crypto.randomUUID();
+      const takeoverJobKeyOne = `draft-takeover-one-${crypto.randomUUID()}`;
+      const takeoverJobKeyTwo = `draft-takeover-two-${crypto.randomUUID()}`;
+      const takeoverDraftKey = `gmail-draft-takeover-${crypto.randomUUID()}`;
+      const takeoverRunIdOne = crypto.randomUUID();
+      const takeoverRunIdTwo = crypto.randomUUID();
+      let connectionId = '';
+
+      try {
+        const [googleConnection] = (await connection.client`
+          WITH inserted_user AS (
+            INSERT INTO users (email) VALUES (${email}) RETURNING id
+          ), configured_settings AS (
+            INSERT INTO agent_settings (user_id, agent_id, enabled, settings_json)
+            SELECT id, 'job-search-email', true,
+              '{"createDrafts":true,"draftConfidenceThreshold":0.9,"emailSignature":"署名","userName":"候補者"}'::jsonb
+            FROM inserted_user
+            RETURNING user_id
+          )
+          INSERT INTO connections (
+            user_id, type, google_email, encrypted_refresh_token, granted_scopes, status
+          )
+          SELECT
+            user_id, 'google', ${email}, 'encrypted-test-token',
+            ARRAY['https://www.googleapis.com/auth/gmail.compose'], 'connected'
+          FROM configured_settings
+          RETURNING id
+        `) as Array<{ id: string }>;
+        if (!googleConnection) throw new Error('Expected a Google connection');
+        connectionId = googleConnection.id;
+        expect(await settings.getReplySettings(connectionId)).toEqual({
+          createDrafts: true,
+          draftConfidenceThreshold: 0.9,
+          emailSignature: '署名',
+          googleEmail: email,
+          userName: '候補者',
+        });
+
+        const job = await queue.enqueue({
+          agentId: 'job-search-email',
+          input: { gmailMessageId: 'message-1' },
+          triggerType: 'manual',
+          idempotencyKey,
+        });
+        await runs.startRun({
+          runId,
+          jobId: job.id,
+          agentId: 'job-search-email',
+          triggerType: 'manual',
+          input: { gmailMessageId: 'message-1' },
+          startedAt: new Date(),
+        });
+        const reservationInput = {
+          googleConnectionId: connectionId,
+          gmailMessageId: 'message-1',
+          gmailThreadId: 'thread-1',
+          idempotencyKey,
+          jobId: job.id,
+          runId,
+        };
+        expect(await drafts.reserve(reservationInput)).toEqual({
+          draftId: null,
+          status: 'reserved',
+        });
+        expect(await drafts.reserve(reservationInput)).toEqual({
+          draftId: null,
+          status: 'reserved',
+        });
+        const completionInput = {
+          gmailDraft: {
+            draftId: 'gmail-draft-1',
+            messageId: 'draft-message-1',
+            threadId: 'thread-1',
+          },
+          idempotencyKey,
+          jobId: job.id,
+          replyBodyHash: 'a'.repeat(64),
+          runId,
+        };
+        await drafts.complete(completionInput);
+        await drafts.complete(completionInput);
+        await expect(
+          drafts.complete({
+            ...completionInput,
+            gmailDraft: { ...completionInput.gmailDraft, draftId: 'different-draft' },
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
+        expect(await drafts.reserve(reservationInput)).toEqual({
+          draftId: 'gmail-draft-1',
+          status: 'completed',
+        });
+
+        const failedJob = await queue.enqueue({
+          agentId: 'job-search-email',
+          input: { gmailMessageId: 'message-2' },
+          triggerType: 'manual',
+          idempotencyKey: takeoverJobKeyOne,
+        });
+        await runs.startRun({
+          runId: takeoverRunIdOne,
+          jobId: failedJob.id,
+          agentId: 'job-search-email',
+          triggerType: 'manual',
+          input: { gmailMessageId: 'message-2' },
+          startedAt: new Date(),
+        });
+        const failedReservation = {
+          googleConnectionId: connectionId,
+          gmailMessageId: 'message-2',
+          gmailThreadId: 'thread-2',
+          idempotencyKey: takeoverDraftKey,
+          jobId: failedJob.id,
+          runId: takeoverRunIdOne,
+        };
+        expect(await drafts.reserve(failedReservation)).toEqual({
+          draftId: null,
+          status: 'reserved',
+        });
+        await connection.client`
+          UPDATE agent_jobs SET status = 'failed', completed_at = NOW()
+          WHERE id = ${failedJob.id}::uuid
+        `;
+
+        const recoveryJob = await queue.enqueue({
+          agentId: 'job-search-email',
+          input: { gmailMessageId: 'message-2' },
+          triggerType: 'manual',
+          idempotencyKey: takeoverJobKeyTwo,
+        });
+        await runs.startRun({
+          runId: takeoverRunIdTwo,
+          jobId: recoveryJob.id,
+          agentId: 'job-search-email',
+          triggerType: 'manual',
+          input: { gmailMessageId: 'message-2' },
+          startedAt: new Date(),
+        });
+        expect(
+          await drafts.reserve({
+            ...failedReservation,
+            jobId: recoveryJob.id,
+            runId: takeoverRunIdTwo,
+          }),
+        ).toEqual({ draftId: null, status: 'reserved' });
+        await expect(
+          drafts.complete({
+            gmailDraft: {
+              draftId: 'stale-owner-draft',
+              messageId: 'stale-owner-message',
+              threadId: 'thread-2',
+            },
+            idempotencyKey: takeoverDraftKey,
+            jobId: failedJob.id,
+            replyBodyHash: 'b'.repeat(64),
+            runId: takeoverRunIdOne,
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
+        await drafts.complete({
+          gmailDraft: {
+            draftId: 'recovered-draft',
+            messageId: 'recovered-message',
+            threadId: 'thread-2',
+          },
+          idempotencyKey: takeoverDraftKey,
+          jobId: recoveryJob.id,
+          replyBodyHash: 'c'.repeat(64),
+          runId: takeoverRunIdTwo,
+        });
+      } finally {
+        if (connectionId) {
+          await connection.client`DELETE FROM connections WHERE id = ${connectionId}::uuid`;
+        }
+        await connection.client`DELETE FROM agent_runs WHERE id = ${runId}::uuid`;
+        await connection.client`
+          DELETE FROM agent_runs
+          WHERE id IN (${takeoverRunIdOne}::uuid, ${takeoverRunIdTwo}::uuid)
+        `;
+        await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
+        await connection.client`
+          DELETE FROM agent_jobs
+          WHERE idempotency_key IN (${takeoverJobKeyOne}, ${takeoverJobKeyTwo})
+        `;
         await connection.client`DELETE FROM users WHERE email = ${email}`;
         await connection.close();
       }

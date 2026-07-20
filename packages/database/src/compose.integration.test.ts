@@ -14,6 +14,7 @@ const composeEnvironment = {
   GOOGLE_REDIRECT_URI: 'http://localhost:14000/auth/google/callback',
   OPENAI_API_KEY: 'compose-fake-openai-key',
   OPENAI_ANALYSIS_MODEL: 'compose-fake-model',
+  OPENAI_REPLY_MODEL: 'compose-fake-reply-model',
   POSTGRES_HOST_PORT: '15432',
   TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
 };

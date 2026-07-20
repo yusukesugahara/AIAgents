@@ -43,6 +43,7 @@ services:
       - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_ANALYSIS_MODEL=${OPENAI_ANALYSIS_MODEL:-}
+      - OPENAI_REPLY_MODEL=${OPENAI_REPLY_MODEL:-}
     depends_on:
       migrate:
         condition: service_completed_successfully

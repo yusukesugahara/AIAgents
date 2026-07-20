@@ -12,6 +12,10 @@ export {
   PostgresJobEmailAnalysisRepository,
   PostgresJobEmailReviewRequestRepository,
 } from './postgres-job-email-analysis';
+export {
+  PostgresJobEmailDraftRepository,
+  PostgresJobEmailSettingsRepository,
+} from './postgres-job-email-draft';
 export type { PostgresJobQueueOptions } from './postgres-job-queue';
 export { PostgresAgentRunRepository, PostgresJobQueue } from './postgres-job-queue';
 export { PostgresLlmInvocationRepository } from './postgres-llm-invocation';

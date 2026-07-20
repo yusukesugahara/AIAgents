@@ -13,6 +13,10 @@ export const googleOAuthScopes = [
   'https://www.googleapis.com/auth/gmail.readonly',
 ] as const;
 
+export const gmailReadonlyScope = 'https://www.googleapis.com/auth/gmail.readonly';
+export const gmailComposeScope = 'https://www.googleapis.com/auth/gmail.compose';
+export type GoogleOAuthPurpose = 'gmail_read' | 'gmail_compose';
+
 const authorizationEndpoint = 'https://accounts.google.com/o/oauth2/v2/auth';
 const tokenEndpoint = 'https://oauth2.googleapis.com/token';
 const userInfoEndpoint = 'https://openidconnect.googleapis.com/v1/userinfo';
@@ -49,6 +53,7 @@ export type GoogleAccessTokenConfig = Pick<
 
 export interface GoogleAuthorizationRequest {
   readonly codeChallenge: string;
+  readonly scopes?: readonly string[];
   readonly state: string;
 }
 
@@ -79,6 +84,7 @@ export interface GoogleOAuthProvider {
 
 export interface OAuthStateRecord {
   readonly encryptedCodeVerifier: string;
+  readonly purpose?: GoogleOAuthPurpose;
 }
 
 export interface OAuthStateRepository {
@@ -86,6 +92,7 @@ export interface OAuthStateRepository {
     readonly browserNonceHash: string;
     readonly encryptedCodeVerifier: string;
     readonly expiresAt: Date;
+    readonly purpose?: GoogleOAuthPurpose;
     readonly stateHash: string;
   }): Promise<void>;
   consume(input: {
@@ -133,7 +140,7 @@ export interface GoogleConnectionCredentialRepository {
 }
 
 export interface GoogleAccessTokenProvider {
-  getAccessToken(connectionId: string): Promise<string>;
+  getAccessToken(connectionId: string, requiredScopes?: readonly string[]): Promise<string>;
   invalidateAccessToken(connectionId: string): void;
 }
 
@@ -182,7 +189,10 @@ export interface GoogleAccessTokenServiceOptions {
  * Access tokens remain process-local and are never persisted.
  */
 export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
-  readonly #cachedTokens = new Map<string, { accessToken: string; expiresAt: number }>();
+  readonly #cachedTokens = new Map<
+    string,
+    { accessToken: string; expiresAt: number; grantedScopes: readonly string[] }
+  >();
   readonly #inFlightRefreshes = new Map<string, Promise<string>>();
   readonly #now: () => Date;
   readonly #refreshSkewMs: number;
@@ -195,7 +205,10 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
     }
   }
 
-  async getAccessToken(connectionId: string): Promise<string> {
+  async getAccessToken(
+    connectionId: string,
+    requiredScopes: readonly string[] = [gmailReadonlyScope],
+  ): Promise<string> {
     if (!isUuid(connectionId)) {
       throw new AgentDependencyError(
         'INVALID_REQUEST',
@@ -204,21 +217,26 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
       );
     }
     const cached = this.#cachedTokens.get(connectionId);
-    if (cached && cached.expiresAt - this.#refreshSkewMs > this.#now().getTime()) {
+    if (
+      cached &&
+      cached.expiresAt - this.#refreshSkewMs > this.#now().getTime() &&
+      requiredScopes.every((scope) => cached.grantedScopes.includes(scope))
+    ) {
       return cached.accessToken;
     }
 
-    const existing = this.#inFlightRefreshes.get(connectionId);
+    const refreshKey = `${connectionId}:${[...new Set(requiredScopes)].sort().join(' ')}`;
+    const existing = this.#inFlightRefreshes.get(refreshKey);
     if (existing) {
       return existing;
     }
 
-    const refresh = this.#refresh(connectionId);
-    this.#inFlightRefreshes.set(connectionId, refresh);
+    const refresh = this.#refresh(connectionId, requiredScopes);
+    this.#inFlightRefreshes.set(refreshKey, refresh);
     try {
       return await refresh;
     } finally {
-      this.#inFlightRefreshes.delete(connectionId);
+      this.#inFlightRefreshes.delete(refreshKey);
     }
   }
 
@@ -226,7 +244,7 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
     this.#cachedTokens.delete(connectionId);
   }
 
-  async #refresh(connectionId: string): Promise<string> {
+  async #refresh(connectionId: string, requiredScopes: readonly string[]): Promise<string> {
     let credential: GoogleConnectionCredential | null;
     try {
       credential = await this.options.credentials.findCredentialById(connectionId);
@@ -245,11 +263,11 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
         'Google connection is unavailable or requires reauthorization',
       );
     }
-    if (!credential.grantedScopes.includes('https://www.googleapis.com/auth/gmail.readonly')) {
+    if (!requiredScopes.every((scope) => credential.grantedScopes.includes(scope))) {
       throw new AgentDependencyError(
         'PERMISSION_DENIED',
         false,
-        'Google connection does not grant Gmail read access',
+        'Google connection does not grant the required permission',
       );
     }
 
@@ -281,6 +299,7 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
       this.#cachedTokens.set(connectionId, {
         accessToken: token.accessToken,
         expiresAt: this.#now().getTime() + token.expiresInSeconds * 1000,
+        grantedScopes: credential.grantedScopes,
       });
       return token.accessToken;
     } catch (error) {
@@ -436,7 +455,7 @@ export class GoogleOAuthService {
     }
   }
 
-  async begin(): Promise<GoogleOAuthAuthorization> {
+  async begin(purpose: GoogleOAuthPurpose = 'gmail_read'): Promise<GoogleOAuthAuthorization> {
     await this.cleanupExpiredStates();
     const state = Buffer.from(this.#randomBytes(32)).toString('base64url');
     const browserNonce = Buffer.from(this.#randomBytes(32)).toString('base64url');
@@ -446,11 +465,16 @@ export class GoogleOAuthService {
       browserNonceHash: sha256Hex(browserNonce),
       encryptedCodeVerifier: this.options.cipher.encrypt(codeVerifier),
       expiresAt: new Date(this.#now().getTime() + this.#stateTtlMs),
+      purpose,
       stateHash: sha256Hex(state),
     });
 
     return {
-      authorizationUrl: this.options.provider.createAuthorizationUrl({ codeChallenge, state }),
+      authorizationUrl: this.options.provider.createAuthorizationUrl({
+        codeChallenge,
+        scopes: scopesForPurpose(purpose),
+        state,
+      }),
       browserNonce,
     };
   }
@@ -486,7 +510,11 @@ export class GoogleOAuthService {
     if (!profile.emailVerified || !isValidEmail(email)) {
       throw new GoogleOAuthError('OAUTH_PROFILE_INVALID', 'Google account email is not verified');
     }
-    if (!tokens.grantedScopes.includes('https://www.googleapis.com/auth/gmail.readonly')) {
+    if (
+      !scopesForPurpose(state.purpose ?? 'gmail_read').every((scope) =>
+        tokens.grantedScopes.includes(scope),
+      )
+    ) {
       throw new GoogleOAuthError(
         'OAUTH_PROVIDER_FAILURE',
         'Google did not grant the required permission',
@@ -569,7 +597,7 @@ export class HttpGoogleOAuthProvider implements GoogleOAuthProvider {
       prompt: 'consent',
       redirect_uri: this.config.redirectUri,
       response_type: 'code',
-      scope: googleOAuthScopes.join(' '),
+      scope: (request.scopes ?? googleOAuthScopes).join(' '),
       state: request.state,
     }).toString();
     return url.toString();
@@ -745,6 +773,12 @@ export function loadGoogleAccessTokenConfig(environment = process.env): GoogleAc
 
 function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value);
+}
+
+function scopesForPurpose(purpose: GoogleOAuthPurpose): readonly string[] {
+  return purpose === 'gmail_compose'
+    ? [...googleOAuthScopes, gmailComposeScope]
+    : googleOAuthScopes;
 }
 
 function isUuid(value: string): boolean {

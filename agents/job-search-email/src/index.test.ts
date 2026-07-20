@@ -1,15 +1,25 @@
 import { describe, expect, test } from 'bun:test';
 import { type AgentContext, AgentDependencyError } from '@ai-agents/agent-core';
-import type { EmailMessage, EmailThread, GmailReader } from '@ai-agents/connector-google';
+import type {
+  CreatedGmailDraft,
+  EmailMessage,
+  EmailThread,
+  GmailDraftWriter,
+  GmailReader,
+} from '@ai-agents/connector-google';
 import type { LlmInvocationMetadata } from '@ai-agents/llm';
 import { FakeLlmProvider } from '@ai-agents/testing';
 import {
   buildJobEmailAnalysisInput,
+  buildJobEmailReplyInput,
   createJobSearchEmailAgent,
   type JobEmailAnalysis,
   type JobEmailAnalysisRecord,
   type JobEmailAnalysisRepository,
+  type JobEmailDraftRepository,
+  type JobEmailReplySettings,
   type JobEmailReviewRequestRepository,
+  type JobEmailSettingsRepository,
   jobEmailAnalysisPromptVersion,
   jobEmailAnalysisSchema,
   jobEmailAnalysisSchemaName,
@@ -71,6 +81,7 @@ function message(
     sentAt,
     messageId: `<${id}@example.com>`,
     inReplyTo: null,
+    replyTo: null,
     references: [],
     bodyText,
     bodyTruncated: false,
@@ -79,10 +90,12 @@ function message(
 
 class FakeGmailReader implements Pick<GmailReader, 'getMessage' | 'getThread'> {
   readonly requests: unknown[] = [];
+  private threadReads = 0;
 
   constructor(
     readonly emailMessage: EmailMessage,
     readonly emailThread: EmailThread,
+    readonly refreshedEmailThread?: EmailThread,
   ) {}
 
   async getMessage(input: unknown): Promise<EmailMessage> {
@@ -92,7 +105,12 @@ class FakeGmailReader implements Pick<GmailReader, 'getMessage' | 'getThread'> {
 
   async getThread(input: unknown): Promise<EmailThread> {
     this.requests.push(input);
-    return this.emailThread;
+    const thread =
+      this.threadReads > 0 && this.refreshedEmailThread
+        ? this.refreshedEmailThread
+        : this.emailThread;
+    this.threadReads += 1;
+    return thread;
   }
 }
 
@@ -120,6 +138,65 @@ class FakeReviewRepository implements JobEmailReviewRequestRepository {
   }
 }
 
+class FakeReplySettingsRepository implements JobEmailSettingsRepository {
+  calls: string[] = [];
+
+  constructor(
+    private readonly settings: JobEmailReplySettings | null = {
+      createDrafts: true,
+      draftConfidenceThreshold: 0.85,
+      emailSignature: '山田 太郎',
+      googleEmail: 'candidate@example.com',
+      userName: '山田 太郎',
+    },
+  ) {}
+
+  async getReplySettings(googleConnectionId: string): Promise<JobEmailReplySettings | null> {
+    this.calls.push(googleConnectionId);
+    return this.settings;
+  }
+}
+
+class FakeDraftRepository implements JobEmailDraftRepository {
+  completed: Parameters<JobEmailDraftRepository['complete']>[0][] = [];
+  reservations: Parameters<JobEmailDraftRepository['reserve']>[0][] = [];
+  reservation: Awaited<ReturnType<JobEmailDraftRepository['reserve']>> = {
+    draftId: null,
+    status: 'reserved',
+  };
+
+  async complete(input: Parameters<JobEmailDraftRepository['complete']>[0]): Promise<void> {
+    this.completed.push(input);
+  }
+
+  async reserve(
+    input: Parameters<JobEmailDraftRepository['reserve']>[0],
+  ): Promise<Awaited<ReturnType<JobEmailDraftRepository['reserve']>>> {
+    this.reservations.push(input);
+    return this.reservation;
+  }
+}
+
+class FakeGmailDraftWriter implements GmailDraftWriter {
+  created: Parameters<GmailDraftWriter['createReplyDraft']>[0][] = [];
+  found: Parameters<GmailDraftWriter['findReplyDraft']>[0][] = [];
+  existing: CreatedGmailDraft | null = null;
+
+  async createReplyDraft(
+    input: Parameters<GmailDraftWriter['createReplyDraft']>[0],
+  ): Promise<CreatedGmailDraft> {
+    this.created.push(input);
+    return { draftId: 'draft-1', messageId: 'draft-message-1', threadId: input.gmailThreadId };
+  }
+
+  async findReplyDraft(
+    input: Parameters<GmailDraftWriter['findReplyDraft']>[0],
+  ): Promise<CreatedGmailDraft | null> {
+    this.found.push(input);
+    return this.existing;
+  }
+}
+
 function context(): AgentContext {
   return {
     agentId: 'job-search-email',
@@ -135,12 +212,31 @@ function createDependencies(result: JobEmailAnalysis = analysis()) {
   const emailMessage = message();
   const gmail = new FakeGmailReader(emailMessage, { id: 'thread-1', messages: [emailMessage] });
   const analyses = new FakeAnalysisRepository();
+  const drafts = new FakeDraftRepository();
+  const gmailDrafts = new FakeGmailDraftWriter();
   const reviews = new FakeReviewRepository();
   const llm = new FakeLlmProvider([{ data: result, metadata, status: 'completed' }]);
-  return { analyses, gmail, llm, model: 'test-model', reviews };
+  const settings = new FakeReplySettingsRepository();
+  return {
+    analyses,
+    drafts,
+    gmail,
+    gmailDrafts,
+    llm,
+    model: 'test-model',
+    replyModel: 'test-reply-model',
+    reviews,
+    settings,
+  };
 }
 
 describe('Job Search Email Agent', () => {
+  test('rejects a missing reply model during construction', () => {
+    expect(() => createJobSearchEmailAgent({ ...createDependencies(), replyModel: '   ' })).toThrow(
+      'OPENAI_REPLY_MODEL is required',
+    );
+  });
+
   test('fetches a consistent Gmail thread, calls the versioned schema, and saves valid analysis', async () => {
     const dependencies = createDependencies();
     const agent = createJobSearchEmailAgent(dependencies);
@@ -276,6 +372,268 @@ describe('Job Search Email Agent', () => {
       retryable: true,
     });
   });
+
+  test('creates exactly one reply Draft only after a safe reply is generated', async () => {
+    const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
+    const dependencies = createDependencies(analysisResult);
+    const replyTarget = { ...message(), replyTo: '応募受付 <applications@example.com>' };
+    dependencies.gmail = new FakeGmailReader(replyTarget, {
+      id: 'thread-1',
+      messages: [replyTarget],
+    });
+    dependencies.llm = new FakeLlmProvider([
+      { data: analysisResult, metadata, status: 'completed' },
+      {
+        data: {
+          body: 'ご連絡ありがとうございます。\nよろしくお願いいたします。',
+          confidence: 0.95,
+          warnings: [],
+        },
+        metadata,
+        status: 'completed',
+      },
+    ]);
+    const drafts = new FakeDraftRepository();
+    const gmailDrafts = new FakeGmailDraftWriter();
+    const output = await createJobSearchEmailAgent({
+      ...dependencies,
+      drafts,
+      gmailDrafts,
+      replyModel: 'test-reply-model',
+      settings: new FakeReplySettingsRepository(),
+    }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toMatchObject({ draftId: 'draft-1', result: 'completed' });
+    expect(dependencies.llm.requests).toHaveLength(2);
+    expect(drafts.reservations).toHaveLength(1);
+    expect(drafts.completed).toHaveLength(1);
+    expect(gmailDrafts.created).toEqual([
+      expect.objectContaining({
+        gmailThreadId: 'thread-1',
+        inReplyTo: '<message-1@example.com>',
+        subject: '選考のご案内',
+        to: 'applications@example.com',
+      }),
+    ]);
+    expect(dependencies.reviews.saved).toHaveLength(0);
+  });
+
+  test('routes incomplete reply material to review without generating or creating a Draft', async () => {
+    const analysisResult = analysis({
+      missingRequiredInformation: ['面談日時'],
+      needsReply: true,
+      replyIntent: 'acknowledge',
+    });
+    const dependencies = createDependencies(analysisResult);
+    const drafts = new FakeDraftRepository();
+    const gmailDrafts = new FakeGmailDraftWriter();
+    const output = await createJobSearchEmailAgent({
+      ...dependencies,
+      drafts,
+      gmailDrafts,
+      replyModel: 'test-reply-model',
+      settings: new FakeReplySettingsRepository(),
+    }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output.result).toBe('needs_review');
+    expect(dependencies.reviews.saved[0]?.reason).toBe('reply_information_missing');
+    expect(dependencies.llm.requests).toHaveLength(1);
+    expect(drafts.reservations).toHaveLength(0);
+    expect(gmailDrafts.created).toHaveLength(0);
+  });
+
+  test('honors disabled Draft creation without requiring reply profile settings', async () => {
+    const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
+    const dependencies = createDependencies(analysisResult);
+    dependencies.settings = new FakeReplySettingsRepository({
+      createDrafts: false,
+      draftConfidenceThreshold: 0.85,
+      emailSignature: '',
+      googleEmail: 'candidate@example.com',
+      userName: null,
+    });
+
+    const output = await createJobSearchEmailAgent(dependencies).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toMatchObject({ draftId: null, result: 'completed' });
+    expect(dependencies.llm.requests).toHaveLength(1);
+    expect(dependencies.reviews.saved).toHaveLength(0);
+    expect(dependencies.gmailDrafts.created).toHaveLength(0);
+  });
+
+  test('routes unsafe reply headers to review before generating a reply', async () => {
+    const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
+    const dependencies = createDependencies(analysisResult);
+    const emailMessage = { ...message(), subject: '' };
+    dependencies.gmail = new FakeGmailReader(emailMessage, {
+      id: 'thread-1',
+      messages: [emailMessage],
+    });
+    const drafts = new FakeDraftRepository();
+    const gmailDrafts = new FakeGmailDraftWriter();
+    const output = await createJobSearchEmailAgent({
+      ...dependencies,
+      drafts,
+      gmailDrafts,
+      replyModel: 'test-reply-model',
+      settings: new FakeReplySettingsRepository(),
+    }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output.result).toBe('needs_review');
+    expect(dependencies.reviews.saved[0]?.reason).toBe('reply_headers_invalid');
+    expect(dependencies.llm.requests).toHaveLength(1);
+    expect(drafts.reservations).toHaveLength(0);
+    expect(gmailDrafts.created).toHaveLength(0);
+  });
+
+  test('does not create a Draft when the user already replied later in the thread', async () => {
+    const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
+    const dependencies = createDependencies(analysisResult);
+    const target = message();
+    const userReply = {
+      ...message(
+        'message-2',
+        'thread-1',
+        'すでに返信しました。',
+        new Date('2026-07-19T02:00:00.000Z'),
+      ),
+      from: 'candidate@example.com',
+      replyTo: null,
+    };
+    dependencies.gmail = new FakeGmailReader(target, {
+      id: 'thread-1',
+      messages: [target, userReply],
+    });
+
+    const output = await createJobSearchEmailAgent(dependencies).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output.result).toBe('needs_review');
+    expect(dependencies.reviews.saved[0]?.reason).toBe('reply_target_stale');
+    expect(dependencies.llm.requests).toHaveLength(1);
+    expect(dependencies.gmailDrafts.created).toHaveLength(0);
+  });
+
+  test('rechecks the thread after reply generation before creating a Draft', async () => {
+    const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
+    const dependencies = createDependencies(analysisResult);
+    dependencies.llm = new FakeLlmProvider([
+      { data: analysisResult, metadata, status: 'completed' },
+      {
+        data: { body: '承知しました。', confidence: 0.95, warnings: [] },
+        metadata,
+        status: 'completed',
+      },
+    ]);
+    const target = message();
+    const userReply = {
+      ...message(
+        'message-2',
+        'thread-1',
+        '生成中に返信しました。',
+        new Date('2026-07-19T02:00:00.000Z'),
+      ),
+      from: 'candidate@example.com',
+      replyTo: null,
+    };
+    dependencies.gmail = new FakeGmailReader(
+      target,
+      { id: 'thread-1', messages: [target] },
+      { id: 'thread-1', messages: [target, userReply] },
+    );
+
+    const output = await createJobSearchEmailAgent(dependencies).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output.result).toBe('needs_review');
+    expect(dependencies.reviews.saved[0]?.reason).toBe('reply_target_stale');
+    expect(dependencies.llm.requests).toHaveLength(2);
+    expect(dependencies.gmailDrafts.created).toHaveLength(0);
+    expect(dependencies.drafts.reservations).toHaveLength(0);
+  });
+
+  test('returns an existing Draft without creating a duplicate', async () => {
+    const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
+    const dependencies = createDependencies(analysisResult);
+    dependencies.llm = new FakeLlmProvider([
+      { data: analysisResult, metadata, status: 'completed' },
+      {
+        data: { body: '承知しました。', confidence: 0.95, warnings: [] },
+        metadata,
+        status: 'completed',
+      },
+    ]);
+    const drafts = new FakeDraftRepository();
+    drafts.reservation = { draftId: 'existing-draft', status: 'completed' };
+    const gmailDrafts = new FakeGmailDraftWriter();
+    const output = await createJobSearchEmailAgent({
+      ...dependencies,
+      drafts,
+      gmailDrafts,
+      replyModel: 'test-reply-model',
+      settings: new FakeReplySettingsRepository(),
+    }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toMatchObject({ draftId: 'existing-draft', result: 'completed' });
+    expect(gmailDrafts.found).toHaveLength(0);
+    expect(gmailDrafts.created).toHaveLength(0);
+    expect(drafts.completed).toHaveLength(0);
+  });
+
+  test('recovers an externally created Draft after history persistence was interrupted', async () => {
+    const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
+    const dependencies = createDependencies(analysisResult);
+    dependencies.llm = new FakeLlmProvider([
+      { data: analysisResult, metadata, status: 'completed' },
+      {
+        data: { body: '承知しました。', confidence: 0.95, warnings: [] },
+        metadata,
+        status: 'completed',
+      },
+    ]);
+    dependencies.gmailDrafts.existing = {
+      draftId: 'recovered-draft',
+      messageId: 'recovered-message',
+      threadId: 'thread-1',
+    };
+
+    const output = await createJobSearchEmailAgent(dependencies).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toMatchObject({ draftId: 'recovered-draft', result: 'completed' });
+    expect(dependencies.gmailDrafts.found).toHaveLength(1);
+    expect(dependencies.gmailDrafts.created).toHaveLength(0);
+    expect(dependencies.drafts.completed[0]?.gmailDraft.draftId).toBe('recovered-draft');
+  });
 });
 
 describe('Job Email analysis schema and prompt boundary', () => {
@@ -385,5 +743,32 @@ describe('Job Email analysis schema and prompt boundary', () => {
     ).toBeGreaterThan(0);
     expect(promptMessages.some((item) => item.bodyTruncated)).toBe(true);
     expect(jobEmailAnalysisSystemPrompt).toContain('untrusted email data');
+  });
+
+  test('keeps reply prompts within the payload limit after adding verified metadata', () => {
+    const messages = Array.from({ length: 20 }, (_, index) =>
+      message(
+        `message-${index}`,
+        'thread-1',
+        'あ'.repeat(100_000),
+        new Date(Date.UTC(2026, 6, 1, index)),
+      ),
+    );
+    const payload = buildJobEmailReplyInput({
+      analysis: analysis({
+        evidence: Array.from({ length: 5 }, () => '根拠'.repeat(120)),
+        missingRequiredInformation: Array.from({ length: 10 }, () => '情報'.repeat(20)),
+      }),
+      signature: '署名'.repeat(600),
+      target: messages[0] as EmailMessage,
+      thread: { id: 'thread-1', messages },
+      userName: '候補者'.repeat(20),
+    });
+    const parsed = JSON.parse(payload) as {
+      EMAIL_THREAD_DATA: { messages: Array<{ id: string }> };
+    };
+
+    expect(Buffer.byteLength(payload, 'utf8')).toBeLessThanOrEqual(maximumPromptPayloadBytes);
+    expect(parsed.EMAIL_THREAD_DATA.messages.some((item) => item.id === 'message-0')).toBe(true);
   });
 });

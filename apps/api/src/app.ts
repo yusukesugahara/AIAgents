@@ -99,13 +99,28 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
   app.get('/auth/google', async (context) => {
     context.header('Cache-Control', 'no-store');
     context.header('Referrer-Policy', 'no-referrer');
-    const authorization = await requireGoogleOAuth(options).begin();
+    const authorization = await requireGoogleOAuth(options).begin('gmail_read');
     context.header(
       'Set-Cookie',
       serializeOAuthCookie(authorization.browserNonce, options.oauthCookieSecure ?? false),
     );
     logger.info({
       event: 'oauth.google.authorization_started',
+      requestId: context.get('requestId'),
+    });
+    return context.redirect(authorization.authorizationUrl, 303);
+  });
+
+  app.get('/auth/google/compose', async (context) => {
+    context.header('Cache-Control', 'no-store');
+    context.header('Referrer-Policy', 'no-referrer');
+    const authorization = await requireGoogleOAuth(options).begin('gmail_compose');
+    context.header(
+      'Set-Cookie',
+      serializeOAuthCookie(authorization.browserNonce, options.oauthCookieSecure ?? false),
+    );
+    logger.info({
+      event: 'oauth.google.compose_authorization_started',
       requestId: context.get('requestId'),
     });
     return context.redirect(authorization.authorizationUrl, 303);
@@ -400,6 +415,7 @@ function isPublicPath(pathname: string): boolean {
   return (
     pathname.startsWith('/health/') ||
     pathname === '/auth/google' ||
+    pathname === '/auth/google/compose' ||
     pathname === '/auth/google/callback' ||
     pathname === '/auth/google/complete'
   );

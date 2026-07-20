@@ -1,14 +1,16 @@
 import { createRuntimeAgentRegistry } from '@ai-agents/agent-composition';
 import { AgentRunner } from '@ai-agents/agent-core';
 import { loadJobEmailAnalysisRuntimeConfig, loadJobRuntimeConfig } from '@ai-agents/config';
-import { HttpGmailReader } from '@ai-agents/connector-google';
+import { HttpGmailDraftWriter, HttpGmailReader } from '@ai-agents/connector-google';
 import {
   createDatabaseConnection,
   type DatabaseConnection,
   PostgresAgentRunRepository,
   PostgresGoogleConnectionRepository,
   PostgresJobEmailAnalysisRepository,
+  PostgresJobEmailDraftRepository,
   PostgresJobEmailReviewRequestRepository,
+  PostgresJobEmailSettingsRepository,
   PostgresJobQueue,
   PostgresLlmInvocationRepository,
 } from '@ai-agents/database';
@@ -50,13 +52,17 @@ const accessTokens = new GoogleAccessTokenService({
 });
 const jobSearchEmailAgent = createJobSearchEmailAgent({
   analyses: new PostgresJobEmailAnalysisRepository(database),
+  drafts: new PostgresJobEmailDraftRepository(database),
+  gmailDrafts: new HttpGmailDraftWriter({ accessTokens }),
   gmail: new HttpGmailReader({ accessTokens }),
   llm: new OpenAiLlmProvider({
     apiKey: analysisRuntimeConfig.openAiApiKey,
     invocationRepository: new PostgresLlmInvocationRepository(database),
   }),
   model: analysisRuntimeConfig.openAiModel,
+  replyModel: analysisRuntimeConfig.openAiReplyModel,
   reviews: new PostgresJobEmailReviewRequestRepository(database),
+  settings: new PostgresJobEmailSettingsRepository(database),
 });
 
 const worker = await startWorker({
