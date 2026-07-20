@@ -2,7 +2,6 @@ import { AgentDependencyError } from '@ai-agents/agent-core';
 import type {
   JobEmailAnalysisRecord,
   JobEmailAnalysisRepository,
-  JobEmailReviewRequestRepository,
   StoredJobEmailAnalysis,
 } from '@ai-agents/job-search-email';
 import {
@@ -12,6 +11,7 @@ import {
   jobEmailAnalysisSchemaVersion,
 } from '@ai-agents/job-search-email';
 import type { DatabaseConnection } from './client';
+import { invalidPersistenceReference } from './postgres-errors';
 
 interface AnalysisRow {
   readonly analysis_json: unknown;
@@ -150,52 +150,6 @@ export class PostgresJobEmailAnalysisRepository implements JobEmailAnalysisRepos
       runId: row.run_id,
     };
   }
-}
-
-export class PostgresJobEmailReviewRequestRepository implements JobEmailReviewRequestRepository {
-  constructor(private readonly database: Pick<DatabaseConnection, 'client'>) {}
-
-  async createReviewRequest(input: {
-    readonly agentId: string;
-    readonly jobId: string;
-    readonly reason: 'llm_invalid_output' | 'llm_refusal';
-    readonly runId: string;
-  }): Promise<void> {
-    const [run] = (await this.database.client`
-      SELECT EXISTS (
-        SELECT 1 FROM agent_runs
-        WHERE id = ${input.runId}::uuid
-          AND job_id = ${input.jobId}::uuid
-          AND agent_id = ${input.agentId}
-      ) AS matches
-    `) as Array<{ matches: boolean }>;
-    if (!run?.matches) {
-      throw invalidPersistenceReference('Review request Run, Job, and Agent do not match');
-    }
-
-    const [inserted] = await this.database.client`
-      INSERT INTO review_requests (agent_id, job_id, run_id, reason)
-      VALUES (${input.agentId}, ${input.jobId}::uuid, ${input.runId}::uuid, ${input.reason})
-      ON CONFLICT (run_id) DO NOTHING
-      RETURNING id
-    `;
-    if (inserted) return;
-
-    const [existing] = await this.database.client`
-      SELECT id FROM review_requests
-      WHERE run_id = ${input.runId}::uuid
-        AND job_id = ${input.jobId}::uuid
-        AND agent_id = ${input.agentId}
-        AND reason = ${input.reason}
-    `;
-    if (!existing) {
-      throw invalidPersistenceReference('Review request Run already has different ownership');
-    }
-  }
-}
-
-function invalidPersistenceReference(message: string): AgentDependencyError {
-  return new AgentDependencyError('INVALID_REQUEST', false, message);
 }
 
 function toDate(value: Date | string): Date {
