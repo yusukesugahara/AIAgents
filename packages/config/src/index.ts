@@ -13,6 +13,38 @@ export interface JobEmailAnalysisRuntimeConfig {
   readonly openAiReplyModel: string;
 }
 
+export interface GmailPollingRuntimeConfig {
+  readonly intervalMs: number;
+  readonly maxResults: number;
+  readonly query: string;
+}
+
+export function loadGmailPollingRuntimeConfig(
+  environment = process.env,
+): GmailPollingRuntimeConfig {
+  const intervalSeconds = readPositiveInteger(
+    environment.GMAIL_POLL_INTERVAL_SECONDS,
+    'GMAIL_POLL_INTERVAL_SECONDS',
+    300,
+  );
+  if (intervalSeconds > Math.floor(Number.MAX_SAFE_INTEGER / 1_000)) {
+    throw new Error('GMAIL_POLL_INTERVAL_SECONDS is too large');
+  }
+  const maxResults = readPositiveInteger(
+    environment.GMAIL_POLL_MAX_RESULTS,
+    'GMAIL_POLL_MAX_RESULTS',
+    50,
+  );
+  if (maxResults > 100) {
+    throw new Error('GMAIL_POLL_MAX_RESULTS must be at most 100');
+  }
+  const query = (environment.GMAIL_LOOKBACK_QUERY ?? 'in:inbox newer_than:1d').trim();
+  if (!query || query.length > 1_000) {
+    throw new Error('GMAIL_LOOKBACK_QUERY must contain 1 through 1000 characters');
+  }
+  return { intervalMs: intervalSeconds * 1_000, maxResults, query };
+}
+
 export function loadJobEmailAnalysisRuntimeConfig(
   environment = process.env,
 ): JobEmailAnalysisRuntimeConfig {

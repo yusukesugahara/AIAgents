@@ -59,6 +59,9 @@ describe('API Google OAuth routes', () => {
     expect(completed).toEqual([
       { browserNonce: 'browser-nonce', code: 'code-value', state: 'state-value' },
     ]);
+    const completedPage = await app.request('/auth/google/complete');
+    expect(completedPage.status).toBe(303);
+    expect(completedPage.headers.get('location')).toBe('/setup?oauth=completed');
 
     const denied = await app.request(
       '/auth/google/callback?error=access_denied&state=cancel-state',

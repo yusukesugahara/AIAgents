@@ -18,6 +18,7 @@ import {
   type JobEmailAnalysis,
   type JobSearchEmailOutput,
   jobEmailAnalysisSchema,
+  jobEmailAnalysisStructuredOutputSchema,
   jobSearchEmailInputSchema,
   jobSearchEmailOutputSchema,
 } from './schemas';
@@ -96,7 +97,7 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
             model: dependencies.model,
             promptVersion: jobEmailAnalysisPromptVersion,
             runId: context.runId,
-            schema: jobEmailAnalysisSchema,
+            schema: jobEmailAnalysisStructuredOutputSchema,
             schemaName: jobEmailAnalysisSchemaName,
             schemaVersion: jobEmailAnalysisSchemaVersion,
             signal: context.signal,
@@ -175,6 +176,7 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
           applicable: action.kind === 'ready',
           outcome: action.kind,
           ...(action.kind === 'needs_review' ? { reviewReason: action.reason } : {}),
+          ...(action.kind === 'not_applicable' ? { notApplicableReason: action.reason } : {}),
         }),
       );
       // Keep the conflict check as close as possible to the external-write boundary because

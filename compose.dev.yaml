@@ -1,0 +1,14 @@
+services:
+  api:
+    command: bun --no-env-file --watch apps/api/src/index.ts
+    volumes:
+      - ./apps:/app/apps:ro
+      - ./agents:/app/agents:ro
+      - ./packages:/app/packages:ro
+
+  worker:
+    command: bun --no-env-file --watch apps/worker/src/index.ts
+    volumes:
+      - ./apps:/app/apps:ro
+      - ./agents:/app/agents:ro
+      - ./packages:/app/packages:ro

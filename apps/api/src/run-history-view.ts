@@ -26,7 +26,7 @@ export function renderRunHistoryList(view: RunHistoryListView): string {
     ? `<a class="button secondary" href="/history?page=${view.page + 1}">次へ</a>`
     : '<span></span>';
 
-  return layout(
+  return renderWebPage(
     '実行履歴',
     `<main class="container">
       <header class="page-header">
@@ -60,7 +60,7 @@ export function renderRunHistoryDetail(run: RunView): string {
     ? run.steps.map(renderStep).join('')
     : '<li class="empty">記録されたStepはありません。</li>';
 
-  return layout(
+  return renderWebPage(
     `Run ${run.id}`,
     `<main class="container">
       <nav class="breadcrumb"><a href="/history">実行履歴</a><span>/</span><span>Run詳細</span></nav>
@@ -80,6 +80,7 @@ export function renderRunHistoryDetail(run: RunView): string {
         ${summaryCard('Gmail Draft ID', output?.draftId ?? '—', true)}
         ${summaryCard('Calendar Event ID', output?.calendarEventId ?? '—', true)}
       </section>
+      ${run.errorDetail ? `<section class="panel error-detail" aria-label="エラー詳細"><h2>エラー詳細</h2><p>${escapeHtml(run.errorDetail)}</p></section>` : ''}
       <section class="panel" aria-labelledby="steps-heading">
         <div class="panel-heading"><h2 id="steps-heading">Steps</h2><span class="muted">${run.steps.length}件</span></div>
         <ol class="timeline">${steps}</ol>
@@ -151,7 +152,7 @@ function formatDuration(startedAt: string, completedAt: string | null): string {
   return `${Math.floor(durationMs / 60_000)}分${Math.floor((durationMs % 60_000) / 1_000)}秒`;
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/gu, (character) => {
     const entities: Record<string, string> = {
       '&': '&amp;',
@@ -164,7 +165,7 @@ function escapeHtml(value: string): string {
   });
 }
 
-function layout(title: string, content: string): string {
+export function renderWebPage(title: string, content: string): string {
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -193,7 +194,10 @@ function layout(title: string, content: string): string {
     .status.running,.status.pending { border-color:rgba(251,191,36,.35); color:var(--amber); background:rgba(251,191,36,.08); }
     .button { display:inline-flex; min-height:40px; align-items:center; justify-content:center; padding:8px 15px; border:1px solid var(--accent); border-radius:10px; color:#082f49; background:var(--accent); font-weight:800; text-decoration:none; }
     .button.secondary { color:var(--text); border-color:var(--line); background:var(--panel); }
+    .button[aria-disabled="true"] { cursor:not-allowed; opacity:.45; pointer-events:none; }
     .text-link,.breadcrumb a { color:var(--accent); font-weight:700; text-decoration:none; }
+    .top-nav { display:flex; align-items:center; justify-content:space-between; gap:20px; width:min(1180px,calc(100% - 32px)); margin:0 auto; padding:18px 0 0; }
+    .top-nav strong { letter-spacing:.04em; } .top-nav div { display:flex; gap:16px; } .top-nav a { color:var(--muted); font-weight:700; text-decoration:none; } .top-nav a:hover { color:var(--accent); }
     .pagination { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:20px; margin-top:20px; color:var(--muted); } .pagination > :last-child { justify-self:end; }
     .breadcrumb { display:flex; gap:10px; margin-bottom:24px; color:var(--muted); }
     .title-line { display:flex; align-items:center; gap:12px; margin-bottom:10px; color:var(--muted); }
@@ -205,9 +209,18 @@ function layout(title: string, content: string): string {
     .error-code { color:var(--red); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
     .step-output { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 16px; margin:12px 0 0; padding:12px; border-radius:10px; background:rgba(11,16,32,.6); } .step-output div { min-width:0; } dt { color:var(--muted); font-size:11px; } dd { margin:0; overflow-wrap:anywhere; }
     .empty { padding:36px; color:var(--muted); text-align:center; }
-    @media (max-width:760px) { .container { width:min(100% - 20px,1180px); padding-top:28px; } .page-header { align-items:stretch; flex-direction:column; } .page-header .button { align-self:flex-start; } .summary-grid { grid-template-columns:1fr; } th,td { padding:12px; } .step-output { grid-template-columns:1fr; } }
+    .error-detail { margin-bottom:24px; padding:18px 20px; border-color:rgba(251,113,133,.35); }
+    .error-detail h2 { color:var(--red); } .error-detail p { margin:8px 0 0; overflow-wrap:anywhere; }
+    .action-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin-bottom:24px; }
+    .action-card { display:flex; min-height:190px; flex-direction:column; align-items:flex-start; padding:20px; } .action-card p { flex:1; color:var(--muted); }
+    .notice { margin-bottom:20px; padding:12px 16px; border:1px solid rgba(74,222,128,.35); border-radius:12px; color:var(--green); background:rgba(74,222,128,.08); }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; padding:20px; } .form-grid .full { grid-column:1/-1; }
+    label { display:grid; gap:6px; color:var(--muted); font-size:12px; font-weight:700; } input,select,textarea { width:100%; min-height:42px; padding:9px 11px; border:1px solid var(--line); border-radius:9px; color:var(--text); background:var(--bg); font:inherit; } textarea { resize:vertical; } input[type="checkbox"] { width:auto; min-height:0; padding:0; } input:focus,select:focus,textarea:focus { border-color:var(--accent); outline:2px solid rgba(125,211,252,.2); }
+    .connection-list { display:grid; gap:10px; margin:0; padding:20px; list-style:none; } .connection-list li { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:13px; border:1px solid var(--line); border-radius:10px; } .connection-list small { display:block; color:var(--muted); }
+    .job-result { margin-bottom:24px; padding:20px; } .job-result dl { display:grid; grid-template-columns:auto 1fr; gap:6px 16px; margin:0; } .job-result dt { color:var(--muted); } .job-result dd { margin:0; }
+    @media (max-width:760px) { .container,.top-nav { width:min(100% - 20px,1180px); } .container { padding-top:28px; } .page-header { align-items:stretch; flex-direction:column; } .page-header .button { align-self:flex-start; } .summary-grid,.action-grid,.form-grid { grid-template-columns:1fr; } .form-grid .full { grid-column:auto; } th,td { padding:12px; } .step-output { grid-template-columns:1fr; } }
   </style>
 </head>
-<body>${content}</body>
+<body><nav class="top-nav" aria-label="メインナビゲーション"><strong>AIAgents</strong><div><a href="/setup">セットアップ</a><a href="/history">実行履歴</a></div></nav>${content}</body>
 </html>`;
 }

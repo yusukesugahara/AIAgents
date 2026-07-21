@@ -25,6 +25,7 @@ export function toRunResponse(run: AgentRun, steps: readonly AgentRunStep[] = []
     agentId: run.agentId,
     completedAt: run.completedAt ? toIsoString(run.completedAt) : null,
     errorCode: run.errorCode,
+    errorDetail: toSafeRunErrorDetail(run.errorCode, run.errorMessage),
     id: run.id,
     jobId: run.jobId,
     startedAt: toIsoString(run.startedAt),
@@ -36,6 +37,35 @@ export function toRunResponse(run: AgentRun, steps: readonly AgentRunStep[] = []
         : [],
     triggerType: run.triggerType,
   };
+}
+
+function toSafeRunErrorDetail(errorCode: string | null, errorMessage: string | null | undefined) {
+  if (typeof errorMessage !== 'string') return null;
+  const invalidResponseDetails = new Set([
+    'Gmail returned an invalid response',
+    'Gmail returned inconsistent message and thread data',
+    'Gmail message is missing required content',
+    'Gmail message has an invalid date',
+    'Gmail message body is invalid',
+  ]);
+  const invalidRequestDetails = new Set([
+    'OpenAI rejected the request',
+    'OpenAI structured output schema is invalid',
+    'LLM model must not be empty',
+    'LLM promptVersion must not be empty',
+    'LLM schemaName must not be empty',
+    'LLM schemaVersion must not be empty',
+    'LLM systemPrompt must not be empty',
+    'LLM userInput must not be empty',
+    'LLM schema is invalid',
+  ]);
+  if (errorCode === 'INVALID_RESPONSE' && invalidResponseDetails.has(errorMessage)) {
+    return errorMessage;
+  }
+  if (errorCode === 'INVALID_REQUEST' && invalidRequestDetails.has(errorMessage)) {
+    return errorMessage;
+  }
+  return null;
 }
 
 function toJobSearchEmailOutput(run: AgentRun): {
@@ -89,6 +119,7 @@ function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
     'draftId',
     'gmailMessageId',
     'gmailThreadId',
+    'notApplicableReason',
     'outcome',
     'result',
     'reviewReason',

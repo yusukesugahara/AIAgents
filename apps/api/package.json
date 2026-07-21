@@ -10,6 +10,7 @@
     "@ai-agents/agent-core": "workspace:*",
     "@ai-agents/agent-composition": "workspace:*",
     "@ai-agents/config": "workspace:*",
+    "@ai-agents/connector-google": "workspace:*",
     "@ai-agents/database": "workspace:*",
     "@ai-agents/google-oauth": "workspace:*",
     "hono": "^4.11.10",

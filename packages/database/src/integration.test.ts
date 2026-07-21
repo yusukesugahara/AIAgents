@@ -239,6 +239,17 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           status: 'connected',
         });
         expect(cipher.decrypt(stored.encrypted_refresh_token)).toBe('second-token');
+        expect(await connections.listConnections()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              email,
+              grantedScopes: ['openid'],
+              id: stored.id,
+              status: 'connected',
+              updatedAt: expect.any(Date),
+            }),
+          ]),
+        );
 
         const freshToken = cipher.encrypt('concurrent-fresh-token');
         await Promise.all([
@@ -305,6 +316,11 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           SELECT status FROM connections WHERE id = ${stored.id}::uuid
         `) as Array<{ status: string }>;
         expect(reauth?.status).toBe('reauth_required');
+        expect(await connections.listConnections()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: stored.id, status: 'reauth_required' }),
+          ]),
+        );
       } finally {
         await connection.client`
           DELETE FROM oauth_authorization_states
@@ -1107,6 +1123,22 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           emailSignature: '署名',
           googleEmail: email,
           userName: '候補者',
+        });
+        expect(
+          await settings.saveReplySettings({
+            createDrafts: true,
+            draftConfidenceThreshold: 0.95,
+            emailSignature: '更新後の署名',
+            googleConnectionId: connectionId,
+            userName: '更新後の候補者',
+          }),
+        ).toBe(true);
+        expect(await settings.getReplySettings(connectionId)).toEqual({
+          createDrafts: true,
+          draftConfidenceThreshold: 0.95,
+          emailSignature: '更新後の署名',
+          googleEmail: email,
+          userName: '更新後の候補者',
         });
 
         const job = await queue.enqueue({

@@ -4,6 +4,7 @@ import type { CreatedGmailDraft, EmailMessage, EmailThread } from '@ai-agents/co
 import { persistResult, persistSafely } from './persistence';
 import type {
   JobEmailReplySettings,
+  JobEmailReplyNotApplicableReason,
   JobEmailReviewReason,
   JobSearchEmailAgentDependencies,
 } from './ports';
@@ -20,7 +21,7 @@ import { generatedReplySchema } from './schemas';
 import { extractAddress, isLatestReplyTarget, isMessageId, isSafeHeaderValue } from './validation';
 
 export type ReplyAction =
-  | { readonly kind: 'not_applicable' }
+  | { readonly kind: 'not_applicable'; readonly reason: JobEmailReplyNotApplicableReason }
   | { readonly kind: 'needs_review'; readonly reason: JobEmailReviewReason }
   | {
       readonly body: string;
@@ -43,19 +44,16 @@ export async function prepareReplyAction(
   message: EmailMessage,
   thread: EmailThread,
 ): Promise<ReplyAction> {
-  if (!analysis.needsReply) return { kind: 'not_applicable' };
+  if (!analysis.needsReply) return { kind: 'not_applicable', reason: 'reply_not_required' };
   const settings = await persistResult(
     () => dependencies.settings.getReplySettings(input.googleConnectionId),
     'Reply settings could not be loaded',
   );
   if (!settings) return { kind: 'needs_review', reason: 'reply_settings_missing' };
-  if (!settings.createDrafts) return { kind: 'not_applicable' };
+  if (!settings.createDrafts) return { kind: 'not_applicable', reason: 'reply_creation_disabled' };
   if (!settings.userName) return { kind: 'needs_review', reason: 'reply_settings_missing' };
   if (analysis.confidence < settings.draftConfidenceThreshold) {
     return { kind: 'needs_review', reason: 'reply_analysis_low_confidence' };
-  }
-  if (analysis.missingRequiredInformation.length > 0) {
-    return { kind: 'needs_review', reason: 'reply_information_missing' };
   }
   if (!isLatestReplyTarget(thread, message.id, settings.googleEmail)) {
     return { kind: 'needs_review', reason: 'reply_target_stale' };
@@ -68,6 +66,33 @@ export async function prepareReplyAction(
     !isSafeHeaderValue(message.subject)
   ) {
     return { kind: 'needs_review', reason: 'reply_headers_invalid' };
+  }
+  if (analysis.missingRequiredInformation.length > 0) {
+    if (!canCreateSchedulingPlaceholderDraft(analysis)) {
+      return { kind: 'needs_review', reason: 'reply_information_missing' };
+    }
+    const currentThread = await dependencies.gmail.getThread({
+      googleConnectionId: input.googleConnectionId,
+      gmailThreadId: input.gmailThreadId,
+    });
+    if (
+      currentThread.id !== input.gmailThreadId ||
+      !isLatestReplyTarget(currentThread, message.id, settings.googleEmail)
+    ) {
+      return { kind: 'needs_review', reason: 'reply_target_stale' };
+    }
+    return {
+      body: createSchedulingPlaceholderDraft(analysis, settings),
+      idempotencyKey: `gmail-draft:${input.googleConnectionId}:${input.gmailMessageId}:scheduling-placeholder.v1`,
+      kind: 'ready',
+      recipient,
+      settings,
+      target: {
+        messageId: message.messageId,
+        references: message.references,
+        subject: message.subject,
+      },
+    };
   }
   const replyResult = await dependencies.llm.generateStructured({
     model: dependencies.replyModel,
@@ -120,6 +145,35 @@ export async function prepareReplyAction(
       subject: message.subject,
     },
   };
+}
+
+function canCreateSchedulingPlaceholderDraft(analysis: JobEmailAnalysis): boolean {
+  return analysis.category === 'scheduling_request' && analysis.missingRequiredInformation.length > 0;
+}
+
+function createSchedulingPlaceholderDraft(
+  analysis: JobEmailAnalysis,
+  settings: JobEmailReplySettings,
+): string {
+  const contactName = analysis.contactName?.trim();
+  const addressee = contactName
+    ? /(?:様|御中)$/u.test(contactName)
+      ? contactName
+      : `${contactName}様`
+    : '採用ご担当者様';
+  return [
+    addressee,
+    '',
+    `お世話になっております。${settings.userName}です。`,
+    '',
+    'ご連絡ありがとうございます。',
+    '日程につきまして、下記候補で調整をお願いいたします。',
+    '',
+    '【候補日時を入力してください】',
+    '',
+    'お手数をおかけしますが、よろしくお願いいたします。',
+    ...(settings.emailSignature ? ['', settings.emailSignature] : []),
+  ].join('\n');
 }
 
 export async function createDraft(

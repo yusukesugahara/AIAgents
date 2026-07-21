@@ -53,6 +53,10 @@ export type JobEmailReviewReason =
   | 'calendar_permission_missing'
   | 'calendar_settings_missing';
 
+export type JobEmailReplyNotApplicableReason =
+  | 'reply_creation_disabled'
+  | 'reply_not_required';
+
 export interface JobEmailReviewRequestRepository {
   createReviewRequest(input: {
     readonly agentId: string;

@@ -136,6 +136,19 @@ export interface GoogleConnectionCredential {
   readonly grantedScopes: readonly string[];
 }
 
+export interface GoogleConnectionSummary {
+  readonly email: string;
+  readonly grantedScopes: readonly string[];
+  readonly id: string;
+  readonly status: 'connected' | 'reauth_required';
+  readonly updatedAt: Date;
+}
+
+/** Read-only connection metadata safe to expose behind the API authentication boundary. */
+export interface GoogleConnectionSummaryRepository {
+  listConnections(): Promise<readonly GoogleConnectionSummary[]>;
+}
+
 /** Runtime-only persistence boundary for a connected Google account. */
 export interface GoogleConnectionCredentialRepository {
   findCredentialById(connectionId: string): Promise<GoogleConnectionCredential | null>;

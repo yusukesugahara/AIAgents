@@ -47,6 +47,45 @@ API起動後に `http://localhost:4000/history` を開くと、直近のAgent Ru
 Run詳細では処理Step、失敗コード、Gmail draft ID、Calendar event IDを表示します。メール本文、
 Prompt、Step入力などの機微情報は表示せず、レスポンスはキャッシュしません。
 
+## セットアップWeb画面
+
+`http://localhost:4000/` を開くとセットアップ画面へ移動します。画面からGmail読取、Gmail下書き、
+Google CalendarのOAuth登録を開始できます。登録済みGoogleアカウントの直近の受信メールを選ぶか、
+GmailのMessage／Thread IDを指定すると、`job-search-email` Agentを実際のJob Queueへテスト投入し、
+実行状況と履歴を確認できます。受信メールの本文はセットアップ画面、ログ、DBへ保存しません。
+Gmailとの下書き接続だけを確認する場合は、最近の受信メールにある「テスト下書きを作成」を押します。
+元メールへの固定文面の返信下書きを作成しますが、AI解析とメール送信は行いません。同じメールでもう一度
+押した場合は既存のテスト下書きを再利用するため、下書きは重複しません。
+Gmail下書きを作成する場合は、Gmail下書き権限を登録し、画面の「返信下書き設定」で氏名、署名、
+信頼度しきい値を保存してから「AI解析・下書き作成」を実行します。Agentが返信不要と判断した場合や、
+必要情報不足、低信頼度などの安全条件に該当した場合は下書きを作成せずレビュー待ちにします。
+
+### Gmailの定期取得
+
+Workerは起動直後と、その後 `GMAIL_POLL_INTERVAL_SECONDS` ごと（既定300秒＝5分）にGmailを確認します。
+対象は読取・下書き権限があり、返信下書き設定を保存して下書き作成をONにした接続済みアカウントです。
+`GMAIL_LOOKBACK_QUERY`（既定 `in:inbox newer_than:1d`）に一致するメールを、1回につき
+`GMAIL_POLL_MAX_RESULTS` 件（既定50件）まで確認し、`schedule` Jobとして投入します。
+同じGoogle接続・Gmail Message IDには同じ冪等キーを使うため、次回以降のポーリングでは
+同じメールのJobやGmail下書きを重複作成しません。
+
+### 開発時のホットリロード
+
+開発時は次のコマンドで起動すると、`apps/`、`agents/`、`packages/` 以下の変更を監視し、
+APIとWorkerをそれぞれ自動再起動します。
+
+```bash
+bun --no-env-file run compose:dev
+```
+
+停止する場合は `Ctrl+C` を押し、必要に応じて次を実行します。
+
+```bash
+bun --no-env-file run compose:dev:down
+```
+
+依存パッケージやDockerfileを変更した場合は、ホットリロードではなく再ビルドが必要です。
+
 ## Google OAuth
 
 Google OAuthを有効にするには、Google Cloud ConsoleでWebアプリケーションのOAuth Clientを作成し、

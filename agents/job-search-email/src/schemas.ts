@@ -148,6 +148,37 @@ export const jobEmailAnalysisSchema = z
     }
   });
 
+/**
+ * JSON Schema sent to the OpenAI Structured Outputs endpoint.
+ *
+ * Luna accepts the same required fields, enums, nullability, and closed objects as the
+ * final contract. Length, URL, date-time, and cross-field constraints remain in
+ * `jobEmailAnalysisSchema`, where they are enforced after the response is received.
+ */
+export const jobEmailAnalysisStructuredOutputSchema = z
+  .object({
+    isJobRelated: z.boolean(),
+    category: jobEmailCategorySchema,
+    companyName: z.string().nullable(),
+    contactName: z.string().nullable(),
+    needsReply: z.boolean(),
+    replyIntent: replyIntentSchema,
+    missingRequiredInformation: z.array(z.string()),
+    meeting: z
+      .object({
+        isConfirmed: z.boolean(),
+        startAt: z.string().nullable(),
+        endAt: z.string().nullable(),
+        timezone: z.string().nullable(),
+        url: z.string().nullable(),
+        urlType: meetingUrlTypeSchema,
+      })
+      .strict(),
+    confidence: z.number(),
+    evidence: z.array(z.string()),
+  })
+  .strict();
+
 export const jobSearchEmailInputSchema = z
   .object({
     googleConnectionId: z.uuid(),

@@ -42,7 +42,8 @@ describe('Run history Web routes', () => {
     runs.runs.set(runId, {
       agentId: 'job-search-email',
       completedAt: now,
-      errorCode: null,
+      errorCode: 'INVALID_RESPONSE',
+      errorMessage: 'Gmail returned inconsistent message and thread data',
       id: runId,
       jobId,
       output: { calendarEventId: null, draftId: null, result: 'needs_review' },
@@ -57,6 +58,7 @@ describe('Run history Web routes', () => {
         id: '0198be1d-a3a9-7d34-9bc3-123456789abe',
         input: { prompt: 'private prompt' },
         output: {
+          notApplicableReason: 'reply_not_required',
           providerDetail: 'private provider detail',
           retryable: true,
           reviewReason: '<script>alert(1)</script>',
@@ -76,12 +78,55 @@ describe('Run history Web routes', () => {
     expect(response.status).toBe(200);
     expect(body).toContain('ANALYZE_EMAIL&lt;img');
     expect(body).toContain('RATE_LIMITED');
+    expect(body).toContain('reply_not_required');
+    expect(body).toContain('Gmail returned inconsistent message and thread data');
     expect(body).toContain('retryable');
     expect(body).toContain('needs_review');
     expect(body).not.toContain('private prompt');
     expect(body).not.toContain('private provider detail');
     expect(body).not.toContain('<script>alert(1)</script>');
     expect(body).not.toContain('<img src=x');
+  });
+
+  test('does not render arbitrary persisted error messages', async () => {
+    const runs = new FakeRunRepository();
+    runs.runs.set(runId, {
+      agentId: 'job-search-email',
+      completedAt: now,
+      errorCode: 'INVALID_RESPONSE',
+      errorMessage: 'private provider response: mailbox@example.com',
+      id: runId,
+      jobId,
+      startedAt: now,
+      status: 'failed',
+      triggerType: 'manual',
+    });
+    const app = createConfiguredApp({ runs });
+
+    const body = await (await app.request(`/history/runs/${runId}`)).text();
+
+    expect(body).not.toContain('private provider response');
+    expect(body).not.toContain('mailbox@example.com');
+  });
+
+  test('renders the safe fixed OpenAI invalid-request detail', async () => {
+    const runs = new FakeRunRepository();
+    runs.runs.set(runId, {
+      agentId: 'job-search-email',
+      completedAt: now,
+      errorCode: 'INVALID_REQUEST',
+      errorMessage: 'OpenAI rejected the request',
+      id: runId,
+      jobId,
+      startedAt: now,
+      status: 'failed',
+      triggerType: 'manual',
+    });
+    const app = createConfiguredApp({ runs });
+
+    const body = await (await app.request(`/history/runs/${runId}`)).text();
+
+    expect(body).toContain('OpenAI rejected the request');
   });
 
   test('rejects invalid pagination input', async () => {

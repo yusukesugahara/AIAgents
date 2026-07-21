@@ -1,6 +1,10 @@
 import { createRuntimeAgentRegistry } from '@ai-agents/agent-composition';
 import { AgentRunner } from '@ai-agents/agent-core';
-import { loadJobEmailAnalysisRuntimeConfig, loadJobRuntimeConfig } from '@ai-agents/config';
+import {
+  loadGmailPollingRuntimeConfig,
+  loadJobEmailAnalysisRuntimeConfig,
+  loadJobRuntimeConfig,
+} from '@ai-agents/config';
 import {
   HttpGmailDraftWriter,
   HttpGmailReader,
@@ -27,11 +31,13 @@ import {
 } from '@ai-agents/google-oauth';
 import { createJobSearchEmailAgent } from '@ai-agents/job-search-email';
 import { OpenAiLlmProvider } from '@ai-agents/llm';
+import { startGmailPoller } from './gmail-poller';
 import { startWorker } from './worker';
 
 let database: DatabaseConnection | undefined;
 const jobRuntimeConfig = loadJobRuntimeConfig();
 const analysisRuntimeConfig = loadJobEmailAnalysisRuntimeConfig();
+const gmailPollingConfig = loadGmailPollingRuntimeConfig();
 const googleAccessTokenConfig = loadGoogleAccessTokenConfig();
 
 try {
@@ -56,13 +62,16 @@ const accessTokens = new GoogleAccessTokenService({
   credentials: googleConnections,
   refresher: new HttpGoogleTokenRefresher(googleAccessTokenConfig),
 });
+const gmail = new HttpGmailReader({ accessTokens });
+const queue = new PostgresJobQueue(database, jobRuntimeConfig);
+const settings = new PostgresJobEmailSettingsRepository(database);
 const jobSearchEmailAgent = createJobSearchEmailAgent({
   analyses: new PostgresJobEmailAnalysisRepository(database),
   calendar: new HttpGoogleCalendarClient({ accessTokens }),
   calendarEvents: new PostgresJobEmailCalendarEventRepository(database),
   drafts: new PostgresJobEmailDraftRepository(database),
   gmailDrafts: new HttpGmailDraftWriter({ accessTokens }),
-  gmail: new HttpGmailReader({ accessTokens }),
+  gmail,
   llm: new OpenAiLlmProvider({
     apiKey: analysisRuntimeConfig.openAiApiKey,
     invocationRepository: new PostgresLlmInvocationRepository(database),
@@ -70,7 +79,7 @@ const jobSearchEmailAgent = createJobSearchEmailAgent({
   model: analysisRuntimeConfig.openAiModel,
   replyModel: analysisRuntimeConfig.openAiReplyModel,
   reviews: new PostgresJobEmailReviewRequestRepository(database),
-  settings: new PostgresJobEmailSettingsRepository(database),
+  settings,
   steps: runs,
 });
 
@@ -79,7 +88,7 @@ const worker = await startWorker({
   leaseHeartbeatIntervalMs: jobRuntimeConfig.leaseHeartbeatIntervalMs,
   leaseTimeoutMs: jobRuntimeConfig.lockTimeoutMs,
   pollIntervalMs: jobRuntimeConfig.pollIntervalMs,
-  queue: new PostgresJobQueue(database, jobRuntimeConfig),
+  queue,
   runner: new AgentRunner({
     registry: createRuntimeAgentRegistry({
       environment: process.env.APP_ENV,
@@ -87,6 +96,15 @@ const worker = await startWorker({
     }),
     repository: runs,
   }),
+});
+const gmailPoller = startGmailPoller({
+  connections: googleConnections,
+  gmail,
+  intervalMs: gmailPollingConfig.intervalMs,
+  maxResults: gmailPollingConfig.maxResults,
+  query: gmailPollingConfig.query,
+  queue,
+  settings,
 });
 
 let shutdownPromise: Promise<void> | undefined;
@@ -100,6 +118,17 @@ const shutdown = async (): Promise<void> => {
     let exitCode = 0;
 
     try {
+      await gmailPoller.stop();
+    } catch (error) {
+      exitCode = 1;
+      console.error(
+        JSON.stringify({
+          event: 'gmail.poller.shutdown_failed',
+          message: error instanceof Error ? error.message : 'unknown',
+        }),
+      );
+    }
+    try {
       await worker.stop();
     } catch (error) {
       exitCode = 1;
@@ -109,9 +138,8 @@ const shutdown = async (): Promise<void> => {
           message: error instanceof Error ? error.message : 'unknown',
         }),
       );
-    } finally {
-      process.exit(exitCode);
     }
+    process.exit(exitCode);
   })();
 
   return shutdownPromise;

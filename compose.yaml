@@ -23,7 +23,7 @@ services:
       - APP_ENV=${APP_ENV:-development}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
-      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:4000/auth/google/callback}
       - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:-}
     depends_on:
       migrate:
@@ -39,11 +39,14 @@ services:
       - APP_ENV=${APP_ENV:-development}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
-      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:4000/auth/google/callback}
       - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_ANALYSIS_MODEL=${OPENAI_ANALYSIS_MODEL:-}
       - OPENAI_REPLY_MODEL=${OPENAI_REPLY_MODEL:-}
+      - GMAIL_POLL_INTERVAL_SECONDS=${GMAIL_POLL_INTERVAL_SECONDS:-300}
+      - GMAIL_POLL_MAX_RESULTS=${GMAIL_POLL_MAX_RESULTS:-50}
+      - GMAIL_LOOKBACK_QUERY=${GMAIL_LOOKBACK_QUERY:-in:inbox newer_than:1d}
     depends_on:
       migrate:
         condition: service_completed_successfully

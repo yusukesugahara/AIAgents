@@ -1,6 +1,43 @@
 import { describe, expect, test } from 'bun:test';
 
-import { loadJobEmailAnalysisRuntimeConfig, loadJobRuntimeConfig } from './index';
+import {
+  loadGmailPollingRuntimeConfig,
+  loadJobEmailAnalysisRuntimeConfig,
+  loadJobRuntimeConfig,
+} from './index';
+
+describe('Gmail polling runtime configuration', () => {
+  test('uses a five-minute interval and fifty-message page by default', () => {
+    expect(loadGmailPollingRuntimeConfig({})).toEqual({
+      intervalMs: 300_000,
+      maxResults: 50,
+      query: 'in:inbox newer_than:1d',
+    });
+  });
+
+  test('validates the Gmail polling interval, page size, and query', () => {
+    expect(() => loadGmailPollingRuntimeConfig({ GMAIL_POLL_INTERVAL_SECONDS: '0' })).toThrow(
+      'GMAIL_POLL_INTERVAL_SECONDS must be a positive integer',
+    );
+    expect(() => loadGmailPollingRuntimeConfig({ GMAIL_POLL_MAX_RESULTS: '101' })).toThrow(
+      'GMAIL_POLL_MAX_RESULTS must be at most 100',
+    );
+    expect(() => loadGmailPollingRuntimeConfig({ GMAIL_LOOKBACK_QUERY: '   ' })).toThrow(
+      'GMAIL_LOOKBACK_QUERY must contain 1 through 1000 characters',
+    );
+    expect(
+      loadGmailPollingRuntimeConfig({
+        GMAIL_LOOKBACK_QUERY: 'in:inbox newer_than:2h',
+        GMAIL_POLL_INTERVAL_SECONDS: '600',
+        GMAIL_POLL_MAX_RESULTS: '25',
+      }),
+    ).toEqual({
+      intervalMs: 600_000,
+      maxResults: 25,
+      query: 'in:inbox newer_than:2h',
+    });
+  });
+});
 
 describe('Job runtime configuration', () => {
   test('uses the documented defaults', () => {

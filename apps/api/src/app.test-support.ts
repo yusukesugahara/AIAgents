@@ -52,8 +52,10 @@ export class FakeJobQueue implements JobQueue {
 
     this.enqueued.push(input);
     const job = createJob({
+      agentId: input.agentId,
       idempotencyKey: input.idempotencyKey ?? null,
       input: input.input,
+      triggerType: input.triggerType,
     });
     this.jobs.set(job.id, job);
     return job;

@@ -374,6 +374,7 @@ class OpenAiSdkClient implements OpenAiStructuredClient {
         input: request.userInput,
         instructions: request.systemPrompt,
         model: request.model,
+        ...(request.model === 'gpt-5.6-luna' ? { reasoning: { effort: 'low' as const } } : {}),
         store: false,
         text: { format },
       },

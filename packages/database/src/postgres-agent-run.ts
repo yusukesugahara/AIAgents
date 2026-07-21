@@ -22,6 +22,7 @@ interface AgentRunRow {
   status: AgentRun['status'];
   trigger_type: string;
   error_code: string | null;
+  error_message: string | null;
   output_json: unknown | null;
   started_at: Date | string;
   completed_at: Date | string | null;
@@ -98,10 +99,11 @@ export class PostgresAgentRunRepository
     const [run] = (await this.database.client`
       SELECT
         runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
-        errors.code AS error_code, runs.output_json, runs.started_at, runs.completed_at
+        errors.code AS error_code, errors.message AS error_message, runs.output_json,
+        runs.started_at, runs.completed_at
       FROM agent_runs AS runs
       LEFT JOIN LATERAL (
-        SELECT code FROM agent_errors
+        SELECT code, message FROM agent_errors
         WHERE run_id = runs.id
         ORDER BY occurred_at DESC
         LIMIT 1
@@ -115,10 +117,11 @@ export class PostgresAgentRunRepository
     const [run] = (await this.database.client`
       SELECT
         runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
-        errors.code AS error_code, runs.output_json, runs.started_at, runs.completed_at
+        errors.code AS error_code, errors.message AS error_message, runs.output_json,
+        runs.started_at, runs.completed_at
       FROM agent_runs AS runs
       LEFT JOIN LATERAL (
-        SELECT code FROM agent_errors
+        SELECT code, message FROM agent_errors
         WHERE run_id = runs.id
         ORDER BY occurred_at DESC
         LIMIT 1
@@ -135,10 +138,11 @@ export class PostgresAgentRunRepository
     const rows = (await this.database.client`
       SELECT
         runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
-        errors.code AS error_code, runs.output_json, runs.started_at, runs.completed_at
+        errors.code AS error_code, errors.message AS error_message, runs.output_json,
+        runs.started_at, runs.completed_at
       FROM agent_runs AS runs
       LEFT JOIN LATERAL (
-        SELECT code FROM agent_errors
+        SELECT code, message FROM agent_errors
         WHERE run_id = runs.id
         ORDER BY occurred_at DESC
         LIMIT 1
@@ -214,6 +218,7 @@ function toAgentRun(row: AgentRunRow): AgentRun {
     status: row.status,
     triggerType: row.trigger_type,
     errorCode: row.error_code,
+    errorMessage: row.error_message,
     output: row.output_json,
     startedAt: toDate(row.started_at),
     completedAt: row.completed_at ? toDate(row.completed_at) : null,

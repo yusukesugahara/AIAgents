@@ -8,6 +8,7 @@ import { registerHealthRoutes } from './routes/health';
 import { registerOAuthRoutes } from './routes/oauth';
 import { registerRunHistoryRoutes } from './routes/run-history';
 import { registerRunRoutes } from './routes/runs';
+import { registerSetupRoutes } from './routes/setup';
 
 export type { ApiAppOptions, ApiLogger } from './api-types';
 
@@ -45,6 +46,7 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
   registerAgentRoutes(app, options, logger);
   registerRunRoutes(app, options);
   registerRunHistoryRoutes(app, options);
+  registerSetupRoutes(app, options, logger);
 
   app.notFound((context) => errorResponse(context, 'NOT_FOUND', 404, 'Route was not found'));
   app.onError((error, context) => {

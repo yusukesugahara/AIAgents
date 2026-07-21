@@ -10,6 +10,7 @@ import {
   FakeGmailDraftWriter,
   FakeGmailReader,
   FakeReplySettingsRepository,
+  FakeStepRepository,
   message,
   metadata,
 } from './test-support';
@@ -98,6 +99,54 @@ describe('Job Search Email reply flow', () => {
     expect(gmailDrafts.created).toHaveLength(0);
   });
 
+  test('creates an editable scheduling Draft when only candidate dates are missing', async () => {
+    const analysisResult = analysis({
+      category: 'scheduling_request',
+      missingRequiredInformation: ['候補日時'],
+      needsReply: true,
+      replyIntent: 'submit_information',
+    });
+    const dependencies = createDependencies(analysisResult);
+    const gmailDrafts = new FakeGmailDraftWriter();
+    const output = await createJobSearchEmailAgent({
+      ...dependencies,
+      gmailDrafts,
+      replyModel: 'test-reply-model',
+      settings: new FakeReplySettingsRepository(),
+    }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toMatchObject({ draftId: 'draft-1', result: 'completed' });
+    expect(dependencies.llm.requests).toHaveLength(1);
+    expect(dependencies.reviews.saved).toHaveLength(0);
+    expect(gmailDrafts.created[0]?.body).toContain('採用担当者様');
+    expect(gmailDrafts.created[0]?.body).toContain('お世話になっております。山田 太郎です。');
+    expect(gmailDrafts.created[0]?.body).toContain('【候補日時を入力してください】');
+  });
+
+  test('creates an editable scheduling Draft regardless of the missing-information label', async () => {
+    const analysisResult = analysis({
+      category: 'scheduling_request',
+      missingRequiredInformation: ['希望条件'],
+      needsReply: true,
+      replyIntent: 'submit_information',
+    });
+    const dependencies = createDependencies(analysisResult);
+    const gmailDrafts = new FakeGmailDraftWriter();
+
+    const output = await createJobSearchEmailAgent({ ...dependencies, gmailDrafts }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toMatchObject({ draftId: 'draft-1', result: 'completed' });
+    expect(gmailDrafts.created[0]?.body).toContain('【候補日時を入力してください】');
+  });
+
   test('honors disabled Draft creation without requiring reply profile settings', async () => {
     const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
     const dependencies = createDependencies(analysisResult);
@@ -119,6 +168,26 @@ describe('Job Search Email reply flow', () => {
     expect(dependencies.llm.requests).toHaveLength(1);
     expect(dependencies.reviews.saved).toHaveLength(0);
     expect(dependencies.gmailDrafts.created).toHaveLength(0);
+  });
+
+  test('records why reply Draft creation is not applicable', async () => {
+    const analysisResult = analysis({ needsReply: false, replyIntent: 'none' });
+    const dependencies = createDependencies(analysisResult);
+    const steps = new FakeStepRepository();
+
+    await createJobSearchEmailAgent({ ...dependencies, steps }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(steps.completed.find((step) => step.stepName === 'GENERATE_REPLY')?.output).toEqual(
+      expect.objectContaining({
+        applicable: false,
+        notApplicableReason: 'reply_not_required',
+        outcome: 'not_applicable',
+      }),
+    );
   });
 
   test('routes unsafe reply headers to review before generating a reply', async () => {

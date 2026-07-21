@@ -6,10 +6,17 @@ import {
   jobEmailAnalysisSystemPrompt,
   maximumPromptPayloadBytes,
 } from './prompt';
-import { jobEmailAnalysisSchema } from './schemas';
+import { jobEmailAnalysisSchema, jobEmailAnalysisStructuredOutputSchema } from './schemas';
 import { analysis, message } from './test-support';
 
 describe('Job Email analysis schema and prompt boundary', () => {
+  test('uses a transport schema compatible with Structured Outputs and validates final data strictly', () => {
+    const candidate = analysis({ companyName: 'a'.repeat(501) });
+
+    expect(jobEmailAnalysisStructuredOutputSchema.safeParse(candidate).success).toBe(true);
+    expect(jobEmailAnalysisSchema.safeParse(candidate).success).toBe(false);
+  });
+
   test('accepts every category and rejects inconsistent cross-field values', () => {
     for (const category of jobEmailAnalysisSchema.shape.category.options) {
       const value =

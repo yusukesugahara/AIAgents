@@ -45,6 +45,8 @@ export interface AgentRun {
   readonly status: 'running' | 'completed' | 'failed';
   readonly triggerType: string;
   readonly errorCode: string | null;
+  /** A persistence-layer error message. Consumers must treat this as sensitive by default. */
+  readonly errorMessage?: string | null;
   readonly startedAt: Date;
   readonly completedAt: Date | null;
   readonly output?: unknown | null;
