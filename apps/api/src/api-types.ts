@@ -5,6 +5,7 @@ import type {
   AgentRunStepRepository,
   JobQueue,
 } from '@ai-agents/agent-core';
+import type { GmailPollingRuntimeConfig } from '@ai-agents/config';
 import type { GmailDraftWriter, GmailReader } from '@ai-agents/connector-google';
 import type { DatabaseConnection, PostgresJobEmailSettingsRepository } from '@ai-agents/database';
 import type {
@@ -36,6 +37,7 @@ export interface ApiAppOptions {
   googleOAuth?: Pick<GoogleOAuthService, 'begin' | 'cancel' | 'complete'>;
   gmail?: Pick<GmailReader, 'getMessage' | 'listMessages'>;
   gmailDrafts?: Pick<GmailDraftWriter, 'createReplyDraft' | 'findReplyDraft'>;
+  gmailPolling?: Pick<GmailPollingRuntimeConfig, 'maxResults' | 'query'>;
   jobEmailSettings?: Pick<
     PostgresJobEmailSettingsRepository,
     'getReplySettings' | 'saveReplySettings'

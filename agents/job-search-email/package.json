@@ -6,6 +6,7 @@
   "dependencies": {
     "@ai-agents/agent-core": "workspace:*",
     "@ai-agents/connector-google": "workspace:*",
+    "@ai-agents/google-oauth": "workspace:*",
     "@ai-agents/llm": "workspace:*",
     "zod": "^4.3.6"
   },

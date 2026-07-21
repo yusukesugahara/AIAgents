@@ -47,6 +47,8 @@ export interface AgentRun {
   readonly errorCode: string | null;
   /** A persistence-layer error message. Consumers must treat this as sensitive by default. */
   readonly errorMessage?: string | null;
+  /** Subject captured from the completed Gmail fetch step, when available. */
+  readonly emailSubject?: string | null;
   readonly startedAt: Date;
   readonly completedAt: Date | null;
   readonly output?: unknown | null;

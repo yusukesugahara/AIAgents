@@ -125,6 +125,13 @@ describe('Job Email analysis schema and prompt boundary', () => {
     expect(jobEmailAnalysisSystemPrompt).toContain('untrusted email data');
   });
 
+  test('prioritizes recruiting and interview signals so scheduling messages are not skipped', () => {
+    expect(jobEmailAnalysisSystemPrompt).toContain('採用, 求人, 面接, 面談, 選考, 日程調整');
+    expect(jobEmailAnalysisSystemPrompt).toContain('scheduling_request');
+    expect(jobEmailAnalysisSystemPrompt).toContain('A scheduling_request is always reply-required');
+    expect(jobEmailAnalysisSystemPrompt).toContain('prefer job-related over');
+  });
+
   test('keeps reply prompts within the payload limit after adding verified metadata', () => {
     const messages = Array.from({ length: 20 }, (_, index) =>
       message(

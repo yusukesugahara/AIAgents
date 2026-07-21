@@ -1,11 +1,10 @@
 import type { JobQueue } from '@ai-agents/agent-core';
 import type { GmailReader } from '@ai-agents/connector-google';
 import {
-  type GoogleConnectionSummaryRepository,
-  gmailComposeScope,
-  gmailReadonlyScope,
-} from '@ai-agents/google-oauth';
-import type { JobEmailSettingsRepository } from '@ai-agents/job-search-email';
+  enqueueScheduledGmailPoll,
+  type JobEmailSettingsRepository,
+} from '@ai-agents/job-search-email';
+import type { GoogleConnectionSummaryRepository } from '@ai-agents/google-oauth';
 
 export interface GmailPollerHandle {
   pollNow(): Promise<void>;
@@ -46,57 +45,23 @@ export function startGmailPoller(options: GmailPollerOptions): GmailPollerHandle
   let stopPromise: Promise<void> | undefined;
 
   const run = async (): Promise<void> => {
-    const connections = await options.connections.listConnections();
-    let eligibleConnections = 0;
-    let messagesFound = 0;
-    for (const connection of connections) {
-      if (
-        connection.status !== 'connected' ||
-        !connection.grantedScopes.includes(gmailReadonlyScope) ||
-        !connection.grantedScopes.includes(gmailComposeScope)
-      ) {
-        continue;
-      }
-      try {
-        const settings = await options.settings.getReplySettings(connection.id);
-        if (!settings?.createDrafts || !settings.userName) continue;
-        eligibleConnections += 1;
-        const page = await options.gmail.listMessages({
-          googleConnectionId: connection.id,
-          maxResults,
-          query,
-        });
-        messagesFound += page.messages.length;
-        for (const message of page.messages) {
-          try {
-            await options.queue.enqueue({
-              agentId: 'job-search-email',
-              idempotencyKey: `gmail-poll:${connection.id}:${message.id}`,
-              input: {
-                gmailMessageId: message.id,
-                gmailThreadId: message.threadId,
-                googleConnectionId: connection.id,
-              },
-              triggerType: 'schedule',
-            });
-          } catch (error) {
-            logger.error({
-              code: safeErrorCode(error),
-              event: 'gmail.poll.enqueue_failed',
-            });
-          }
-        }
-      } catch (error) {
-        logger.error({
-          code: safeErrorCode(error),
-          event: 'gmail.poll.connection_failed',
-        });
-      }
-    }
+    const result = await enqueueScheduledGmailPoll({
+      connections: options.connections,
+      gmail: options.gmail,
+      idempotencyKeyPrefix: 'gmail-poll',
+      logger,
+      maxResults,
+      query,
+      queue: options.queue,
+      settings: options.settings,
+    });
     logger.info({
-      eligibleConnections,
+      connectionFailures: result.connectionFailures,
+      eligibleConnections: result.eligibleConnections,
+      enqueueFailures: result.enqueueFailures,
       event: 'gmail.poll.completed',
-      messagesFound,
+      jobRequestsAccepted: result.jobRequestsAccepted,
+      messagesFound: result.messagesFound,
     });
   };
 

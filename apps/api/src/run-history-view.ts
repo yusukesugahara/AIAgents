@@ -17,7 +17,7 @@ const dateFormatter = new Intl.DateTimeFormat('ja-JP', {
 export function renderRunHistoryList(view: RunHistoryListView): string {
   const rows = view.runs.length
     ? view.runs.map(renderRunRow).join('')
-    : '<tr><td colspan="6" class="empty">実行履歴はまだありません。</td></tr>';
+    : '<tr><td colspan="7" class="empty">実行履歴はまだありません。</td></tr>';
   const previous =
     view.page > 1
       ? `<a class="button secondary" href="/history?page=${view.page - 1}">前へ</a>`
@@ -44,7 +44,7 @@ export function renderRunHistoryList(view: RunHistoryListView): string {
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>状態</th><th>Agent</th><th>結果</th><th>開始</th><th>所要時間</th><th>詳細</th></tr></thead>
+            <thead><tr><th>状態</th><th>Agent</th><th>対象メール</th><th>結果</th><th>開始</th><th>所要時間</th><th>詳細</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
@@ -69,6 +69,7 @@ export function renderRunHistoryDetail(run: RunView): string {
           <div class="title-line">${statusBadge(run.status)}<span class="mono">${escapeHtml(run.id)}</span></div>
           <h1>${escapeHtml(run.agentId)}</h1>
           <p class="lead">${formatDate(run.startedAt)} に開始 · ${escapeHtml(run.triggerType)}</p>
+          ${run.emailSubject ? `<p class="lead">対象メール: ${escapeHtml(run.emailSubject)}</p>` : ''}
         </div>
         <a class="button" href="/history/runs/${encodeURIComponent(run.id)}">更新</a>
       </header>
@@ -93,6 +94,7 @@ function renderRunRow(run: RunView): string {
   return `<tr>
     <td>${statusBadge(run.status)}</td>
     <td><strong>${escapeHtml(run.agentId)}</strong><small class="mono">${escapeHtml(run.id)}</small></td>
+    <td>${escapeHtml(run.emailSubject ?? '—')}</td>
     <td>${escapeHtml(run.output?.result ?? '—')}</td>
     <td>${formatDate(run.startedAt)}</td>
     <td>${escapeHtml(formatDuration(run.startedAt, run.completedAt))}</td>

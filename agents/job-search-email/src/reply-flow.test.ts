@@ -147,6 +147,30 @@ describe('Job Search Email reply flow', () => {
     expect(gmailDrafts.created[0]?.body).toContain('【候補日時を入力してください】');
   });
 
+  test('creates an editable scheduling Draft even when the analysis incorrectly says no reply', async () => {
+    const analysisResult = analysis({
+      category: 'scheduling_request',
+      needsReply: false,
+      replyIntent: 'none',
+    });
+    const dependencies = createDependencies(analysisResult);
+    const gmailDrafts = new FakeGmailDraftWriter();
+
+    const output = await createJobSearchEmailAgent({ ...dependencies, gmailDrafts }).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toMatchObject({ draftId: 'draft-1', result: 'completed' });
+    expect(dependencies.analyses.saved[0]?.analysis).toMatchObject({
+      needsReply: true,
+      replyIntent: 'submit_information',
+    });
+    expect(dependencies.llm.requests).toHaveLength(1);
+    expect(gmailDrafts.created[0]?.body).toContain('【候補日時を入力してください】');
+  });
+
   test('honors disabled Draft creation without requiring reply profile settings', async () => {
     const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
     const dependencies = createDependencies(analysisResult);
@@ -305,6 +329,11 @@ describe('Job Search Email reply flow', () => {
     const drafts = new FakeDraftRepository();
     drafts.reservation = { draftId: 'existing-draft', status: 'completed' };
     const gmailDrafts = new FakeGmailDraftWriter();
+    gmailDrafts.existing = {
+      draftId: 'existing-draft',
+      messageId: 'existing-message',
+      threadId: 'thread-1',
+    };
     const output = await createJobSearchEmailAgent({
       ...dependencies,
       drafts,
@@ -318,9 +347,37 @@ describe('Job Search Email reply flow', () => {
     });
 
     expect(output).toMatchObject({ draftId: 'existing-draft', result: 'completed' });
-    expect(gmailDrafts.found).toHaveLength(0);
+    expect(gmailDrafts.found).toHaveLength(1);
     expect(gmailDrafts.created).toHaveLength(0);
     expect(drafts.completed).toHaveLength(0);
+    expect(drafts.reopened).toHaveLength(0);
+  });
+
+  test('recreates a Draft when the completed database record no longer exists in Gmail', async () => {
+    const analysisResult = analysis({ needsReply: true, replyIntent: 'acknowledge' });
+    const dependencies = createDependencies(analysisResult);
+    dependencies.llm = new FakeLlmProvider([
+      { data: analysisResult, metadata, status: 'completed' },
+      { data: { body: '承知しました。', confidence: 0.95, warnings: [] }, metadata, status: 'completed' },
+    ]);
+    const drafts = new FakeDraftRepository();
+    drafts.reservation = { draftId: 'stale-draft', status: 'completed' };
+    const gmailDrafts = new FakeGmailDraftWriter();
+
+    const output = await createJobSearchEmailAgent({ ...dependencies, drafts, gmailDrafts }).run(
+      context(),
+      {
+        googleConnectionId: connectionId,
+        gmailMessageId: 'message-1',
+        gmailThreadId: 'thread-1',
+      },
+    );
+
+    expect(output).toMatchObject({ draftId: 'draft-1', result: 'completed' });
+    expect(gmailDrafts.found).toHaveLength(2);
+    expect(gmailDrafts.created).toHaveLength(1);
+    expect(drafts.reopened).toHaveLength(1);
+    expect(drafts.completed).toHaveLength(1);
   });
 
   test('recovers an externally created Draft after history persistence was interrupted', async () => {

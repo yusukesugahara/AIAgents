@@ -113,4 +113,30 @@ export class PostgresJobEmailDraftRepository implements JobEmailDraftRepository 
       'Draft reservation does not belong to this Job or was already completed differently',
     );
   }
+
+  async reopen(input: {
+    readonly googleConnectionId: string;
+    readonly gmailMessageId: string;
+    readonly idempotencyKey: string;
+    readonly jobId: string;
+    readonly runId: string;
+  }): Promise<void> {
+    const [reopened] = (await this.database.client`
+      UPDATE job_email_drafts
+      SET status = 'creating', job_id = ${input.jobId}::uuid, run_id = ${input.runId}::uuid,
+          gmail_draft_id = NULL, gmail_draft_message_id = NULL, reply_body_hash = NULL,
+          completed_at = NULL
+      WHERE google_connection_id = ${input.googleConnectionId}::uuid
+        AND gmail_message_id = ${input.gmailMessageId}
+        AND idempotency_key = ${input.idempotencyKey}
+        AND status = 'completed'
+      RETURNING id
+    `) as Array<{ id: string }>;
+    if (reopened) return;
+    throw new AgentDependencyError(
+      'TEMPORARY_UNAVAILABLE',
+      true,
+      'Gmail Draft reservation is no longer available to reopen',
+    );
+  }
 }

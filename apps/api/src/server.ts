@@ -1,5 +1,5 @@
 import { createRuntimeAgentRegistry } from '@ai-agents/agent-composition';
-import { loadJobRuntimeConfig } from '@ai-agents/config';
+import { loadGmailPollingRuntimeConfig, loadJobRuntimeConfig } from '@ai-agents/config';
 import { HttpGmailDraftWriter, HttpGmailReader } from '@ai-agents/connector-google';
 import {
   createDatabaseConnection,
@@ -74,6 +74,7 @@ export function startOAuthStateCleanup(
 export function startApi(options: StartApiOptions): void {
   const port = Number(process.env.APP_PORT ?? 4000);
   const accessToken = resolveApiAccessToken();
+  const gmailPollingConfig = loadGmailPollingRuntimeConfig();
   const jobRuntimeConfig = loadJobRuntimeConfig();
   const oauthRequired = requiresProtectedApi();
   const oauthStateCleanupIntervalMs = options.oauthStateCleanupIntervalMs ?? 15 * 60_000;
@@ -157,6 +158,7 @@ export function startApi(options: StartApiOptions): void {
     ...(googleConnections ? { googleConnections } : {}),
     ...(gmail ? { gmail } : {}),
     ...(gmailDrafts ? { gmailDrafts } : {}),
+    gmailPolling: gmailPollingConfig,
     oauthCookieSecure: oauthRequired,
     oauthRequired,
     ...(database

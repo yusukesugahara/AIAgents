@@ -91,8 +91,13 @@ describe('Setup Web routes', () => {
     expect(body).toContain('person@example.com');
     expect(body).toContain(connectionId);
     expect(body).toContain('/setup/reply-settings');
+    expect(body).toContain('/setup/scheduled-poll');
+    expect(body).toContain('今すぐ定期実行を実行');
+    expect(body).toContain('/setup/scheduled-poll-reset');
+    expect(body).toContain('既存ジョブをリセットして再実行');
     expect(body).toContain('name="_csrf"');
-    expect(body).toContain('AI解析・下書き作成');
+    expect(body).not.toContain('AI Agent テスト実行');
+    expect(body).not.toContain('Gmail Message ID');
     expect(body).not.toContain('encrypted');
   });
 
@@ -166,6 +171,102 @@ describe('Setup Web routes', () => {
     ]);
   });
 
+  test('enqueues the same Jobs as the scheduled Gmail poll from setup', async () => {
+    const queue = new FakeJobQueue();
+    const app = configuredApp({
+      gmail: {
+        getMessage: async () => {
+          throw new Error('getMessage is not used by a scheduled poll');
+        },
+        listMessages: async () => ({
+          messages: [
+            { id: 'message-1', threadId: 'thread-1' },
+            { id: 'message-2', threadId: 'thread-2' },
+          ],
+          nextPageToken: null,
+        }),
+      },
+      queue,
+    });
+
+    const response = await app.request('/setup/scheduled-poll', {
+      body: new URLSearchParams(),
+      headers: { Origin: 'http://localhost' },
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe(
+      '/setup?scheduledPoll=completed&connectionFailures=0&eligibleConnections=1&enqueueFailures=0&jobRequestsAccepted=2&messagesFound=2',
+    );
+    expect(queue.enqueued).toEqual([
+      {
+        agentId: 'job-search-email',
+        idempotencyKey: `gmail-poll:${connectionId}:message-1`,
+        input: {
+          gmailMessageId: 'message-1',
+          gmailThreadId: 'thread-1',
+          googleConnectionId: connectionId,
+        },
+        triggerType: 'schedule',
+      },
+      {
+        agentId: 'job-search-email',
+        idempotencyKey: `gmail-poll:${connectionId}:message-2`,
+        input: {
+          gmailMessageId: 'message-2',
+          gmailThreadId: 'thread-2',
+          googleConnectionId: connectionId,
+        },
+        triggerType: 'schedule',
+      },
+    ]);
+
+    const result = await app.request(response.headers.get('location') ?? '/setup');
+    expect(await result.text()).toContain('キュー登録要求: 2件');
+  });
+
+  test('resets poll idempotency without deleting prior history and queues a rerun', async () => {
+    const queue = new FakeJobQueue();
+    const app = configuredApp({
+      gmail: {
+        getMessage: async () => {
+          throw new Error('getMessage is not used by a scheduled poll');
+        },
+        listMessages: async () => ({
+          messages: [{ id: 'message-1', threadId: 'thread-1' }],
+          nextPageToken: null,
+        }),
+      },
+      queue,
+    });
+
+    const response = await app.request('/setup/scheduled-poll-reset', {
+      body: new URLSearchParams(),
+      headers: { Origin: 'http://localhost' },
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toContain('scheduledPoll=reset-completed');
+    expect(queue.enqueued).toHaveLength(1);
+    expect(queue.enqueued[0]).toMatchObject({
+      agentId: 'job-search-email',
+      idempotencyKey: expect.stringMatching(
+        new RegExp(`^gmail-poll-reset:[0-9a-f-]{36}:${connectionId}:message-1$`, 'u'),
+      ),
+      input: {
+        gmailMessageId: 'message-1',
+        gmailThreadId: 'thread-1',
+        googleConnectionId: connectionId,
+      },
+      triggerType: 'schedule',
+    });
+
+    const result = await app.request(response.headers.get('location') ?? '/setup');
+    expect(await result.text()).toContain('既存ジョブをリセットして再実行しました');
+  });
+
   test('lists recent Gmail metadata without rendering message bodies', async () => {
     let requestedMaxResults: number | undefined;
     const response = await configuredApp({
@@ -204,6 +305,8 @@ describe('Setup Web routes', () => {
     expect(body).toContain('value="message-1"');
     expect(body).toContain('/setup/draft-test');
     expect(body).toContain('テスト下書きを作成');
+    expect(body).not.toContain('AI Agent テスト実行');
+    expect(body).not.toContain('Gmail Message ID');
     expect(body).not.toContain('private email body');
   });
 

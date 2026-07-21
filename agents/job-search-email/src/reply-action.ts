@@ -44,7 +44,9 @@ export async function prepareReplyAction(
   message: EmailMessage,
   thread: EmailThread,
 ): Promise<ReplyAction> {
-  if (!analysis.needsReply) return { kind: 'not_applicable', reason: 'reply_not_required' };
+  if (!analysis.needsReply && analysis.category !== 'scheduling_request') {
+    return { kind: 'not_applicable', reason: 'reply_not_required' };
+  }
   const settings = await persistResult(
     () => dependencies.settings.getReplySettings(input.googleConnectionId),
     'Reply settings could not be loaded',
@@ -67,10 +69,7 @@ export async function prepareReplyAction(
   ) {
     return { kind: 'needs_review', reason: 'reply_headers_invalid' };
   }
-  if (analysis.missingRequiredInformation.length > 0) {
-    if (!canCreateSchedulingPlaceholderDraft(analysis)) {
-      return { kind: 'needs_review', reason: 'reply_information_missing' };
-    }
+  if (canCreateSchedulingPlaceholderDraft(analysis)) {
     const currentThread = await dependencies.gmail.getThread({
       googleConnectionId: input.googleConnectionId,
       gmailThreadId: input.gmailThreadId,
@@ -93,6 +92,9 @@ export async function prepareReplyAction(
         subject: message.subject,
       },
     };
+  }
+  if (analysis.missingRequiredInformation.length > 0) {
+    return { kind: 'needs_review', reason: 'reply_information_missing' };
   }
   const replyResult = await dependencies.llm.generateStructured({
     model: dependencies.replyModel,
@@ -148,7 +150,7 @@ export async function prepareReplyAction(
 }
 
 function canCreateSchedulingPlaceholderDraft(analysis: JobEmailAnalysis): boolean {
-  return analysis.category === 'scheduling_request' && analysis.missingRequiredInformation.length > 0;
+  return analysis.category === 'scheduling_request';
 }
 
 function createSchedulingPlaceholderDraft(
@@ -194,7 +196,25 @@ export async function createDraft(
       }),
     'Draft reservation could not be saved',
   );
-  if (reservation.status === 'completed' && reservation.draftId) return reservation.draftId;
+  if (reservation.status === 'completed' && reservation.draftId) {
+    const existing = await dependencies.gmailDrafts.findReplyDraft({
+      googleConnectionId: input.googleConnectionId,
+      gmailThreadId: input.gmailThreadId,
+      idempotencyKey: action.idempotencyKey,
+    });
+    if (existing) return existing.draftId;
+    await persistResult(
+      () =>
+        dependencies.drafts.reopen({
+          googleConnectionId: input.googleConnectionId,
+          gmailMessageId: input.gmailMessageId,
+          idempotencyKey: action.idempotencyKey,
+          jobId: context.jobId,
+          runId: context.runId,
+        }),
+      'Gmail Draft reservation could not be reopened',
+    );
+  }
   const existing = await dependencies.gmailDrafts.findReplyDraft({
     googleConnectionId: input.googleConnectionId,
     gmailThreadId: input.gmailThreadId,

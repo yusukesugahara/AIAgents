@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { AgentDependencyError } from '@ai-agents/agent-core';
 import { gmailComposeScope } from '@ai-agents/google-oauth';
+import { enqueueScheduledGmailPoll } from '@ai-agents/job-search-email';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { enqueueManualAgentRun } from '../agent-run-service';
@@ -14,9 +15,20 @@ const draftTestErrorSchema = z
   .string()
   .trim()
   .regex(/^[A-Z][A-Z0-9_]{0,63}$/u);
+const scheduledPollResultSchema = z.object({
+  connectionFailures: z.coerce.number().int().min(0).max(100),
+  eligibleConnections: z.coerce.number().int().min(0).max(100),
+  enqueueFailures: z.coerce.number().int().min(0).max(10_000),
+  jobRequestsAccepted: z.coerce.number().int().min(0).max(10_000),
+  messagesFound: z.coerce.number().int().min(0).max(10_000),
+});
 const csrfCookieName = 'ai_agents_setup_csrf';
 const csrfTokenPattern = /^[a-f0-9]{32}$/u;
 const gmailMetadataFetchConcurrency = 5;
+const defaultScheduledGmailPoll = {
+  maxResults: 50,
+  query: 'in:inbox newer_than:1d',
+} as const;
 const testRunSchema = z.object({
   gmailMessageId: z.string().trim().min(1).max(255),
   gmailThreadId: z.string().trim().min(1).max(255),
@@ -41,6 +53,27 @@ export function registerSetupRoutes(
   options: ApiAppOptions,
   logger: ApiLogger,
 ): void {
+  const enqueueSetupScheduledPoll = async (
+    context: Context<ApiEnvironment>,
+    resetToken?: string,
+  ) => {
+    const polling = options.gmailPolling ?? defaultScheduledGmailPoll;
+    return enqueueScheduledGmailPoll({
+      connections: requireConnections(options),
+      gmail: requireGmail(options),
+      ...(resetToken ? { idempotencyKeyPrefix: `gmail-poll-reset:${resetToken}` } : {}),
+      logger: {
+        error(entry) {
+          logger.error({ ...entry, requestId: context.get('requestId'), source: 'setup' });
+        },
+      },
+      maxResults: polling.maxResults,
+      query: polling.query,
+      queue: requireQueue(options),
+      settings: requireJobEmailSettings(options),
+    });
+  };
+
   app.get('/', (context) => context.redirect('/setup', 303));
 
   app.get('/setup', async (context) => {
@@ -148,6 +181,29 @@ export function registerSetupRoutes(
         status: storedJob.status,
       };
     }
+    let scheduledPollResult:
+      | {
+          readonly connectionFailures: number;
+          readonly eligibleConnections: number;
+          readonly enqueueFailures: number;
+          readonly jobRequestsAccepted: number;
+          readonly messagesFound: number;
+        }
+      | undefined;
+    const scheduledPollReset = context.req.query('scheduledPoll') === 'reset-completed';
+    if (context.req.query('scheduledPoll') === 'completed' || scheduledPollReset) {
+      const parsedScheduledPollResult = scheduledPollResultSchema.safeParse({
+        connectionFailures: context.req.query('connectionFailures'),
+        eligibleConnections: context.req.query('eligibleConnections'),
+        enqueueFailures: context.req.query('enqueueFailures'),
+        jobRequestsAccepted: context.req.query('jobRequestsAccepted'),
+        messagesFound: context.req.query('messagesFound'),
+      });
+      if (!parsedScheduledPollResult.success) {
+        throw new ApiError('BAD_REQUEST', 400, 'Invalid scheduled poll result');
+      }
+      scheduledPollResult = parsedScheduledPollResult.data;
+    }
     setPageHeaders(context);
     return context.html(
       renderSetupPage({
@@ -161,6 +217,8 @@ export function registerSetupRoutes(
         ...(job ? { job } : {}),
         messages,
         oauthCompleted: context.req.query('oauth') === 'completed',
+        scheduledPollReady: Boolean(options.gmail && options.jobEmailSettings && options.queue),
+        ...(scheduledPollResult ? { scheduledPollResult, scheduledPollReset } : {}),
         ...(settingsConnection
           ? {
               replySettings: {
@@ -199,6 +257,20 @@ export function registerSetupRoutes(
       `/setup?connectionId=${encodeURIComponent(connection.id)}&settings=saved`,
       303,
     );
+  });
+
+  app.post('/setup/scheduled-poll', async (context) => {
+    const body = await context.req.parseBody();
+    requireFormSubmission(context, body);
+    const result = await enqueueSetupScheduledPoll(context);
+    return redirectScheduledPollResult(context, logger, result, false);
+  });
+
+  app.post('/setup/scheduled-poll-reset', async (context) => {
+    const body = await context.req.parseBody();
+    requireFormSubmission(context, body);
+    const result = await enqueueSetupScheduledPoll(context, crypto.randomUUID());
+    return redirectScheduledPollResult(context, logger, result, true);
   });
 
   app.post('/setup/test-run', async (context) => {
@@ -323,6 +395,41 @@ export function registerSetupRoutes(
       return context.redirect(resultUrl({ draftError: error.code }), 303);
     }
   });
+}
+
+function redirectScheduledPollResult(
+  context: Context<ApiEnvironment>,
+  logger: ApiLogger,
+  result: {
+    readonly connectionFailures: number;
+    readonly eligibleConnections: number;
+    readonly enqueueFailures: number;
+    readonly jobRequestsAccepted: number;
+    readonly messagesFound: number;
+  },
+  reset: boolean,
+) {
+  logger.info({
+    connectionFailures: result.connectionFailures,
+    eligibleConnections: result.eligibleConnections,
+    enqueueFailures: result.enqueueFailures,
+    event: reset ? 'api.gmail_scheduled_poll.reset_completed' : 'api.gmail_scheduled_poll.completed',
+    jobRequestsAccepted: result.jobRequestsAccepted,
+    messagesFound: result.messagesFound,
+    requestId: context.get('requestId'),
+    source: 'setup',
+  });
+  return context.redirect(
+    `/setup?${new URLSearchParams({
+      scheduledPoll: reset ? 'reset-completed' : 'completed',
+      connectionFailures: String(result.connectionFailures),
+      eligibleConnections: String(result.eligibleConnections),
+      enqueueFailures: String(result.enqueueFailures),
+      jobRequestsAccepted: String(result.jobRequestsAccepted),
+      messagesFound: String(result.messagesFound),
+    }).toString()}`,
+    303,
+  );
 }
 
 function requireConnections(options: ApiAppOptions) {

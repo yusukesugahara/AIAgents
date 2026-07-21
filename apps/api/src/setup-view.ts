@@ -44,6 +44,15 @@ interface SetupView {
   readonly messages: readonly SetupMessageView[];
   readonly oauthCompleted: boolean;
   readonly replySettings?: SetupReplySettingsView;
+  readonly scheduledPollReady: boolean;
+  readonly scheduledPollReset?: boolean;
+  readonly scheduledPollResult?: {
+    readonly connectionFailures: number;
+    readonly eligibleConnections: number;
+    readonly enqueueFailures: number;
+    readonly jobRequestsAccepted: number;
+    readonly messagesFound: number;
+  };
   readonly selectedConnectionId?: string;
   readonly settingsSaved: boolean;
 }
@@ -75,11 +84,8 @@ export function renderSetupPage(view: SetupView): string {
         ${renderConnections(view.connections)}
       </section>
       ${renderReplySettings(view, connected)}
+      ${renderScheduledPoll(view, connected)}
       ${renderInbox(view, connected)}
-      <section class="panel" aria-labelledby="test-heading" style="margin-top:24px">
-        <div class="panel-heading"><div><h2 id="test-heading">AI Agent テスト実行</h2><span class="muted">指定したGmailメッセージを解析します。メール送信は行いません。</span></div></div>
-        ${renderTestForm(connected, view.replySettings?.googleConnectionId, view.draftCreationReady, view.csrfToken)}
-      </section>
     </main>`,
   );
 }
@@ -159,6 +165,40 @@ function renderReplySettings(
   </section>`;
 }
 
+function renderScheduledPoll(view: SetupView, connections: readonly GoogleConnectionSummary[]): string {
+  const disabled = !view.scheduledPollReady || connections.length === 0;
+  return `<section class="panel" aria-labelledby="scheduled-poll-heading" style="margin-top:24px">
+    <div class="panel-heading"><div><h2 id="scheduled-poll-heading">定期実行</h2><span class="muted">定期実行と同じ条件で、下書き作成が有効な全Googleアカウントの対象メールをキューへ投入します。</span></div></div>
+    ${renderScheduledPollResult(view.scheduledPollResult, view.scheduledPollReset ?? false)}
+    <form class="form-grid" method="post" action="/setup/scheduled-poll">
+      <input type="hidden" name="_csrf" value="${escapeHtml(view.csrfToken)}">
+      <div class="full" style="display:flex;flex-wrap:wrap;gap:10px"><button class="button" type="submit" ${disabled ? 'disabled aria-disabled="true"' : ''}>今すぐ定期実行を実行</button></div>
+    </form>
+    <form class="form-grid" method="post" action="/setup/scheduled-poll-reset">
+      <input type="hidden" name="_csrf" value="${escapeHtml(view.csrfToken)}">
+      <div class="full"><button class="button secondary" type="submit" ${disabled ? 'disabled aria-disabled="true"' : ''}>既存ジョブをリセットして再実行</button><p class="muted" style="margin:10px 0 0">過去の実行履歴は削除せず、同じメールを新しいジョブとして再解析します。Gmail下書きとカレンダー予定は重複作成しません。</p></div>
+    </form>
+  </section>`;
+}
+
+function renderScheduledPollResult(
+  result: SetupView['scheduledPollResult'],
+  reset: boolean,
+): string {
+  if (!result) return '';
+  if (result.eligibleConnections === 0) {
+    return '<p class="empty" role="status">対象となるアカウントがありません。Gmailの読み取り・下書き権限、返信下書き設定の「作成する」、あなたの名前を確認してください。</p>';
+  }
+  const summary = `${reset ? '既存ジョブをリセットして再実行しました。' : ''}対象アカウント: ${result.eligibleConnections}件、対象メール: ${result.messagesFound}件、キュー登録要求: ${result.jobRequestsAccepted}件`;
+  if (result.messagesFound === 0) {
+    return `<p class="notice" role="status">${summary}。検索条件に一致する新しいメールがないため、実行履歴に新しいジョブは表示されません。</p>`;
+  }
+  if (result.connectionFailures > 0 || result.enqueueFailures > 0) {
+    return `<p class="empty" role="alert">${summary}。アカウント取得エラー: ${result.connectionFailures}件、キュー登録エラー: ${result.enqueueFailures}件。エラーがあるため、実行履歴に一部またはすべてのジョブが表示されない可能性があります。</p>`;
+  }
+  return `<p class="notice" role="status">${summary}。${reset ? '新しい実行履歴が作成されます。' : '同じメールは重複防止のため既存ジョブを再利用するので、新しい実行履歴が増えない場合があります。'}</p>`;
+}
+
 function authorizationCard(title: string, description: string, href: string): string {
   return `<article class="panel action-card"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p><a class="button" href="${escapeHtml(href)}">登録する</a></article>`;
 }
@@ -178,29 +218,6 @@ function renderConnections(connections: readonly GoogleConnectionSummary[]): str
       return `<li><div><strong>${escapeHtml(connection.email)}</strong><small class="mono">${escapeHtml(connection.id)}</small><small>権限: ${escapeHtml(permissions.join(' / ') || 'なし')}</small></div><span class="status ${connection.status === 'connected' ? 'completed' : 'failed'}">${status}</span></li>`;
     })
     .join('')}</ul>`;
-}
-
-function renderTestForm(
-  connections: readonly GoogleConnectionSummary[],
-  selectedConnectionId: string | undefined,
-  draftCreationReady: boolean,
-  csrfToken: string,
-): string {
-  const options = connections
-    .map(
-      (connection) =>
-        `<option value="${escapeHtml(connection.id)}"${connection.id === selectedConnectionId ? ' selected' : ''}>${escapeHtml(connection.email)} — ${escapeHtml(connection.id)}</option>`,
-    )
-    .join('');
-  const disabled = connections.length === 0 || !draftCreationReady;
-  return `<form class="form-grid" method="post" action="/setup/test-run">
-    <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}">
-    <label class="full">Googleアカウント<select name="googleConnectionId" required ${disabled ? 'disabled' : ''}>${options || '<option value="">先にGoogleアカウントを登録してください</option>'}</select></label>
-    <label>Gmail Message ID<input name="gmailMessageId" maxlength="255" required autocomplete="off" placeholder="例: 18f..." ${disabled ? 'disabled' : ''}></label>
-    <label>Gmail Thread ID<input name="gmailThreadId" maxlength="255" required autocomplete="off" placeholder="例: 18f..." ${disabled ? 'disabled' : ''}></label>
-    <label class="full">Idempotency Key（任意）<input name="idempotencyKey" maxlength="255" autocomplete="off" placeholder="同じテストの重複実行を防ぐキー" ${disabled ? 'disabled' : ''}></label>
-    <div class="full"><button class="button" type="submit" ${disabled ? 'disabled aria-disabled="true"' : ''}>AI解析・下書き作成を実行</button></div>
-  </form>`;
 }
 
 function renderJob(job: SetupJobView): string {

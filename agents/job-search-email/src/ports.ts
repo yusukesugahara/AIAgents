@@ -106,6 +106,14 @@ export interface JobEmailDraftRepository {
     readonly jobId: string;
     readonly runId: string;
   }): Promise<JobEmailDraftReservation>;
+  /** Reopens a completed reservation only after Gmail confirms its Draft is gone. */
+  reopen(input: {
+    readonly googleConnectionId: string;
+    readonly gmailMessageId: string;
+    readonly idempotencyKey: string;
+    readonly jobId: string;
+    readonly runId: string;
+  }): Promise<void>;
 }
 
 export interface JobEmailCalendarEventReservation {

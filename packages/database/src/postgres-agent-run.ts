@@ -23,6 +23,7 @@ interface AgentRunRow {
   trigger_type: string;
   error_code: string | null;
   error_message: string | null;
+  email_subject: string | null;
   output_json: unknown | null;
   started_at: Date | string;
   completed_at: Date | string | null;
@@ -99,7 +100,7 @@ export class PostgresAgentRunRepository
     const [run] = (await this.database.client`
       SELECT
         runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
-        errors.code AS error_code, errors.message AS error_message, runs.output_json,
+        errors.code AS error_code, errors.message AS error_message, email.email_subject, runs.output_json,
         runs.started_at, runs.completed_at
       FROM agent_runs AS runs
       LEFT JOIN LATERAL (
@@ -108,6 +109,15 @@ export class PostgresAgentRunRepository
         ORDER BY occurred_at DESC
         LIMIT 1
       ) AS errors ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT output_json->>'emailSubject' AS email_subject
+        FROM agent_run_steps
+        WHERE run_id = runs.id
+          AND step_name = 'FETCH_EMAIL_THREAD'
+          AND status = 'succeeded'
+        ORDER BY sequence
+        LIMIT 1
+      ) AS email ON TRUE
       WHERE runs.id = ${runId}::uuid
     `) as AgentRunRow[];
     return run ? toAgentRun(run) : null;
@@ -117,7 +127,7 @@ export class PostgresAgentRunRepository
     const [run] = (await this.database.client`
       SELECT
         runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
-        errors.code AS error_code, errors.message AS error_message, runs.output_json,
+        errors.code AS error_code, errors.message AS error_message, email.email_subject, runs.output_json,
         runs.started_at, runs.completed_at
       FROM agent_runs AS runs
       LEFT JOIN LATERAL (
@@ -126,6 +136,15 @@ export class PostgresAgentRunRepository
         ORDER BY occurred_at DESC
         LIMIT 1
       ) AS errors ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT output_json->>'emailSubject' AS email_subject
+        FROM agent_run_steps
+        WHERE run_id = runs.id
+          AND step_name = 'FETCH_EMAIL_THREAD'
+          AND status = 'succeeded'
+        ORDER BY sequence
+        LIMIT 1
+      ) AS email ON TRUE
       WHERE runs.job_id = ${jobId}::uuid
       ORDER BY runs.started_at DESC, runs.id DESC
       LIMIT 1
@@ -138,7 +157,7 @@ export class PostgresAgentRunRepository
     const rows = (await this.database.client`
       SELECT
         runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
-        errors.code AS error_code, errors.message AS error_message, runs.output_json,
+        errors.code AS error_code, errors.message AS error_message, email.email_subject, runs.output_json,
         runs.started_at, runs.completed_at
       FROM agent_runs AS runs
       LEFT JOIN LATERAL (
@@ -147,6 +166,15 @@ export class PostgresAgentRunRepository
         ORDER BY occurred_at DESC
         LIMIT 1
       ) AS errors ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT output_json->>'emailSubject' AS email_subject
+        FROM agent_run_steps
+        WHERE run_id = runs.id
+          AND step_name = 'FETCH_EMAIL_THREAD'
+          AND status = 'succeeded'
+        ORDER BY sequence
+        LIMIT 1
+      ) AS email ON TRUE
       ORDER BY runs.started_at DESC, runs.id DESC
       LIMIT ${options.limit + 1}
       OFFSET ${options.offset}
@@ -219,10 +247,17 @@ function toAgentRun(row: AgentRunRow): AgentRun {
     triggerType: row.trigger_type,
     errorCode: row.error_code,
     errorMessage: row.error_message,
+    emailSubject: toSafeEmailSubject(row.email_subject),
     output: row.output_json,
     startedAt: toDate(row.started_at),
     completedAt: row.completed_at ? toDate(row.completed_at) : null,
   };
+}
+
+function toSafeEmailSubject(value: string | null): string | null {
+  if (typeof value !== 'string') return null;
+  const subject = value.replace(/[\u0000-\u001F\u007F]/gu, ' ').trim();
+  return subject ? subject.slice(0, 512) : null;
 }
 
 function toAgentRunStep(row: AgentRunStepRow): AgentRunStep {

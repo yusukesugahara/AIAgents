@@ -24,6 +24,7 @@ export function toRunResponse(run: AgentRun, steps: readonly AgentRunStep[] = []
   return {
     agentId: run.agentId,
     completedAt: run.completedAt ? toIsoString(run.completedAt) : null,
+    emailSubject: toSafeEmailSubject(run.emailSubject),
     errorCode: run.errorCode,
     errorDetail: toSafeRunErrorDetail(run.errorCode, run.errorMessage),
     id: run.id,
@@ -117,6 +118,7 @@ function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
     'calendarEventId',
     'category',
     'draftId',
+    'emailSubject',
     'gmailMessageId',
     'gmailThreadId',
     'notApplicableReason',
@@ -142,6 +144,12 @@ function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
     safeOutput.messageCount = output.messageCount;
   }
   return safeOutput;
+}
+
+function toSafeEmailSubject(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const subject = value.replace(/[\u0000-\u001F\u007F]/gu, ' ').trim();
+  return subject && subject.length <= 512 ? subject : null;
 }
 
 function toIsoString(value: Date | string): string {

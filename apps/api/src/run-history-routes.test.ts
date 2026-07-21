@@ -8,6 +8,7 @@ describe('Run history Web routes', () => {
     runs.runs.set(runId, {
       agentId: 'job-search-email',
       completedAt: new Date(now.getTime() + 2_500),
+      emailSubject: '面談日程について',
       errorCode: null,
       id: runId,
       jobId,
@@ -33,6 +34,7 @@ describe('Run history Web routes', () => {
     expect(body).toContain('実行履歴');
     expect(body).toContain(`/history/runs/${runId}`);
     expect(body).toContain('完了');
+    expect(body).toContain('面談日程について');
     expect(body).not.toContain('private email excerpt');
     expect(body).not.toContain('<script>alert(1)</script>');
   });
@@ -44,6 +46,7 @@ describe('Run history Web routes', () => {
       completedAt: now,
       errorCode: 'INVALID_RESPONSE',
       errorMessage: 'Gmail returned inconsistent message and thread data',
+      emailSubject: 'Interview &lt;script&gt;',
       id: runId,
       jobId,
       output: { calendarEventId: null, draftId: null, result: 'needs_review' },
@@ -82,6 +85,7 @@ describe('Run history Web routes', () => {
     expect(body).toContain('Gmail returned inconsistent message and thread data');
     expect(body).toContain('retryable');
     expect(body).toContain('needs_review');
+    expect(body).toContain('対象メール: Interview &amp;lt;script&amp;gt;');
     expect(body).not.toContain('private prompt');
     expect(body).not.toContain('private provider detail');
     expect(body).not.toContain('<script>alert(1)</script>');

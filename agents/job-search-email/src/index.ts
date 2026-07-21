@@ -1,5 +1,6 @@
 import type { AgentContext } from '@ai-agents/agent-core';
 import { AgentDependencyError, defineAgent } from '@ai-agents/agent-core';
+import { normalizeJobEmailAnalysis } from './analysis-normalization';
 import { createCalendarEvent, prepareCalendarAction } from './calendar-action';
 import { manifest } from './manifest';
 import { persistResult, persistSafely } from './persistence';
@@ -25,8 +26,10 @@ import {
 import { isValidIanaTimeZone } from './validation';
 
 export { manifest } from './manifest';
+export * from './analysis-normalization';
 export * from './ports';
 export * from './prompt';
+export * from './scheduled-gmail-poll';
 export * from './schemas';
 
 export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDependencies) {
@@ -73,6 +76,7 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
           return { message, thread };
         },
         ({ message, thread }) => ({
+          emailSubject: message.subject.slice(0, 512),
           gmailMessageId: message.id,
           gmailThreadId: thread.id,
           messageCount: thread.messages.length,
@@ -142,7 +146,7 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
         const output = await saveNeedsReview(dependencies, context, 'llm_invalid_output');
         return completeTrackedRun(dependencies, context, output, 'llm_invalid_output');
       }
-      const analysis = validatedAnalysis.data;
+      const analysis = normalizeJobEmailAnalysis(validatedAnalysis.data);
 
       await persistSafely(
         () =>

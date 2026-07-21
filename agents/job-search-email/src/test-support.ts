@@ -241,6 +241,7 @@ export class FakeGoogleCalendar implements GoogleCalendarClient {
 
 export class FakeDraftRepository implements JobEmailDraftRepository {
   completed: Parameters<JobEmailDraftRepository['complete']>[0][] = [];
+  reopened: Parameters<JobEmailDraftRepository['reopen']>[0][] = [];
   reservations: Parameters<JobEmailDraftRepository['reserve']>[0][] = [];
   reservation: Awaited<ReturnType<JobEmailDraftRepository['reserve']>> = {
     draftId: null,
@@ -256,6 +257,10 @@ export class FakeDraftRepository implements JobEmailDraftRepository {
   ): Promise<Awaited<ReturnType<JobEmailDraftRepository['reserve']>>> {
     this.reservations.push(input);
     return this.reservation;
+  }
+
+  async reopen(input: Parameters<JobEmailDraftRepository['reopen']>[0]): Promise<void> {
+    this.reopened.push(input);
   }
 }
 
