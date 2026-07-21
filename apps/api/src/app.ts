@@ -6,6 +6,7 @@ import { errorResponse, hasValidBearerToken, isPublicPath, oauthErrorMessage } f
 import { registerAgentRoutes } from './routes/agents';
 import { registerHealthRoutes } from './routes/health';
 import { registerOAuthRoutes } from './routes/oauth';
+import { registerRunHistoryRoutes } from './routes/run-history';
 import { registerRunRoutes } from './routes/runs';
 
 export type { ApiAppOptions, ApiLogger } from './api-types';
@@ -43,6 +44,7 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
   registerOAuthRoutes(app, options, logger);
   registerAgentRoutes(app, options, logger);
   registerRunRoutes(app, options);
+  registerRunHistoryRoutes(app, options);
 
   app.notFound((context) => errorResponse(context, 'NOT_FOUND', 404, 'Route was not found'));
   app.onError((error, context) => {
@@ -67,6 +69,9 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
         code: error.code,
         event: 'oauth.google.failed',
         requestId: context.get('requestId'),
+        ...(error.failureReason ? { failureReason: error.failureReason } : {}),
+        ...(error.providerError ? { providerError: error.providerError } : {}),
+        ...(error.providerStatus ? { providerStatus: error.providerStatus } : {}),
       });
       return errorResponse(context, error.code, status, oauthErrorMessage(error.code));
     }

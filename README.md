@@ -41,6 +41,12 @@ Docker Composeの環境設定から渡してください。Migrationは`migrate`
 
 Job は初回を含めて既定で最大 3 回実行され、再試行時は 1 秒、2 秒待機します。
 
+## 実行履歴Web画面
+
+API起動後に `http://localhost:4000/history` を開くと、直近のAgent Runを25件単位で確認できます。
+Run詳細では処理Step、失敗コード、Gmail draft ID、Calendar event IDを表示します。メール本文、
+Prompt、Step入力などの機微情報は表示せず、レスポンスはキャッシュしません。
+
 ## Google OAuth
 
 Google OAuthを有効にするには、Google Cloud ConsoleでWebアプリケーションのOAuth Clientを作成し、

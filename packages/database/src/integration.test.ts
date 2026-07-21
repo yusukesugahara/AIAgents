@@ -737,6 +737,20 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           message: 'provider unavailable',
           job_id: job.id,
         });
+        expect(
+          (await repository.listRuns({ limit: 100, offset: 0 })).runs.filter(
+            (run) => run.jobId === job.id,
+          ),
+        ).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: completedRunId, status: 'completed' }),
+            expect.objectContaining({
+              errorCode: 'AGENT_EXECUTION_FAILED',
+              id: failedRunId,
+              status: 'failed',
+            }),
+          ]),
+        );
 
         await expect(
           repository.completeRun({

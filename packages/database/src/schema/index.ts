@@ -143,7 +143,10 @@ export const agentRuns = pgTable(
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
   },
-  (table) => [index('agent_runs_job_id_started_at_idx').on(table.jobId, table.startedAt)],
+  (table) => [
+    index('agent_runs_job_id_started_at_idx').on(table.jobId, table.startedAt),
+    index('agent_runs_started_at_id_idx').on(table.startedAt, table.id),
+  ],
 );
 
 export const agentRunSteps = pgTable(

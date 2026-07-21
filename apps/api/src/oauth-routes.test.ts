@@ -143,6 +143,50 @@ describe('API Google OAuth routes', () => {
     }
   });
 
+  test('logs only safe OAuth provider diagnostics', async () => {
+    const errors: unknown[] = [];
+    const app = createApp({
+      googleOAuth: {
+        begin: async () => ({
+          authorizationUrl: 'https://accounts.google.com',
+          browserNonce: 'nonce',
+        }),
+        cancel: async () => {},
+        complete: async () => {
+          throw new GoogleOAuthError(
+            'OAUTH_PROVIDER_FAILURE',
+            'sensitive provider detail',
+            'token_exchange',
+            'invalid_client',
+            401,
+          );
+        },
+      },
+      logger: {
+        error(entry) {
+          errors.push(entry);
+        },
+        info() {},
+      },
+      requestIdGenerator: () => 'generated-request-id',
+    });
+
+    const response = await app.request('/auth/google/callback?code=code&state=state');
+
+    expect(response.status).toBe(500);
+    expect(errors).toEqual([
+      {
+        code: 'OAUTH_PROVIDER_FAILURE',
+        event: 'oauth.google.failed',
+        failureReason: 'token_exchange',
+        providerError: 'invalid_client',
+        providerStatus: 401,
+        requestId: 'generated-request-id',
+      },
+    ]);
+    expect(JSON.stringify(errors)).not.toContain('sensitive provider detail');
+  });
+
   test('uses a secure cookie when configured for a protected deployment', async () => {
     const response = await createApp({
       googleOAuth: {

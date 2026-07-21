@@ -96,6 +96,21 @@ export interface AgentRunRepository {
   getRun(runId: string): Promise<AgentRun | null>;
 }
 
+export interface AgentRunListOptions {
+  readonly limit: number;
+  readonly offset: number;
+}
+
+export interface AgentRunListPage {
+  readonly hasMore: boolean;
+  readonly runs: readonly AgentRun[];
+}
+
+export interface AgentRunHistoryRepository {
+  /** Returns Runs in reverse chronological order using startedAt and id as the stable sort key. */
+  listRuns(options: AgentRunListOptions): Promise<AgentRunListPage>;
+}
+
 export interface AgentRunStepRepository {
   startStep(step: AgentRunStepStart): Promise<void>;
   completeStep(step: AgentRunStepCompletion): Promise<void>;

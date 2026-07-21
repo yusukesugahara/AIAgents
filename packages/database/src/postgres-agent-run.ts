@@ -2,6 +2,9 @@ import type {
   AgentRun,
   AgentRunCompletion,
   AgentRunFailure,
+  AgentRunHistoryRepository,
+  AgentRunListOptions,
+  AgentRunListPage,
   AgentRunRepository,
   AgentRunStart,
   AgentRunStep,
@@ -37,7 +40,9 @@ interface AgentRunStepRow {
   completed_at: Date | string | null;
 }
 
-export class PostgresAgentRunRepository implements AgentRunRepository, AgentRunStepRepository {
+export class PostgresAgentRunRepository
+  implements AgentRunRepository, AgentRunHistoryRepository, AgentRunStepRepository
+{
   constructor(private readonly database: Pick<DatabaseConnection, 'client'>) {}
 
   async startRun(run: AgentRunStart): Promise<void> {
@@ -125,6 +130,29 @@ export class PostgresAgentRunRepository implements AgentRunRepository, AgentRunS
     return run ? toAgentRun(run) : null;
   }
 
+  async listRuns(options: AgentRunListOptions): Promise<AgentRunListPage> {
+    assertListOptions(options);
+    const rows = (await this.database.client`
+      SELECT
+        runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
+        errors.code AS error_code, runs.output_json, runs.started_at, runs.completed_at
+      FROM agent_runs AS runs
+      LEFT JOIN LATERAL (
+        SELECT code FROM agent_errors
+        WHERE run_id = runs.id
+        ORDER BY occurred_at DESC
+        LIMIT 1
+      ) AS errors ON TRUE
+      ORDER BY runs.started_at DESC, runs.id DESC
+      LIMIT ${options.limit + 1}
+      OFFSET ${options.offset}
+    `) as AgentRunRow[];
+    return {
+      hasMore: rows.length > options.limit,
+      runs: rows.slice(0, options.limit).map(toAgentRun),
+    };
+  }
+
   async startStep(step: AgentRunStepStart): Promise<void> {
     await this.database.client`
       INSERT INTO agent_run_steps (run_id, sequence, step_name, status, input_json, started_at)
@@ -209,6 +237,15 @@ function toAgentRunStep(row: AgentRunStepRow): AgentRunStep {
 
 function toTimestamp(value: Date): string {
   return value.toISOString();
+}
+
+function assertListOptions(options: AgentRunListOptions): void {
+  if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100) {
+    throw new Error('Agent Run list limit must be an integer between 1 and 100');
+  }
+  if (!Number.isSafeInteger(options.offset) || options.offset < 0) {
+    throw new Error('Agent Run list offset must be a non-negative integer');
+  }
 }
 
 function toDate(value: Date | string): Date {

@@ -1,5 +1,6 @@
 import type {
   AgentRegistry,
+  AgentRunHistoryRepository,
   AgentRunRepository,
   AgentRunStepRepository,
   JobQueue,
@@ -19,6 +20,7 @@ export interface ApiLogger {
 }
 
 export type ApiRunRepository = Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> &
+  AgentRunHistoryRepository &
   Partial<Pick<AgentRunStepRepository, 'getSteps'>>;
 
 export interface ApiAppOptions {

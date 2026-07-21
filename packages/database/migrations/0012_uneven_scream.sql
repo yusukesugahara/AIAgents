@@ -1,0 +1,1 @@
+CREATE INDEX "agent_runs_started_at_id_idx" ON "agent_runs" USING btree ("started_at","id");

@@ -30,10 +30,15 @@ export type GoogleOAuthErrorCode =
   | 'OAUTH_REFRESH_TOKEN_MISSING'
   | 'OAUTH_STATE_INVALID';
 
+export type GoogleOAuthFailureReason = 'profile_lookup' | 'scope_not_granted' | 'token_exchange';
+
 export class GoogleOAuthError extends Error {
   constructor(
     readonly code: GoogleOAuthErrorCode,
     message: string,
+    readonly failureReason?: GoogleOAuthFailureReason,
+    readonly providerError?: string,
+    readonly providerStatus?: number,
   ) {
     super(message);
     this.name = 'GoogleOAuthError';
@@ -512,13 +517,14 @@ export class GoogleOAuthService {
       throw new GoogleOAuthError('OAUTH_PROFILE_INVALID', 'Google account email is not verified');
     }
     if (
-      !scopesForPurpose(state.purpose ?? 'gmail_read').every((scope) =>
+      !requiredApiScopesForPurpose(state.purpose ?? 'gmail_read').every((scope) =>
         tokens.grantedScopes.includes(scope),
       )
     ) {
       throw new GoogleOAuthError(
         'OAUTH_PROVIDER_FAILURE',
         'Google did not grant the required permission',
+        'scope_not_granted',
       );
     }
 
@@ -608,20 +614,30 @@ export class HttpGoogleOAuthProvider implements GoogleOAuthProvider {
     readonly code: string;
     readonly codeVerifier: string;
   }): Promise<GoogleTokenSet> {
-    const { body, ok } = await this.#fetchJson(tokenEndpoint, {
-      body: new URLSearchParams({
-        client_id: this.config.clientId,
-        client_secret: this.config.clientSecret,
-        code: input.code,
-        code_verifier: input.codeVerifier,
-        grant_type: 'authorization_code',
-        redirect_uri: this.config.redirectUri,
-      }),
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      method: 'POST',
-    });
+    const { body, ok, status } = await this.#fetchJson(
+      tokenEndpoint,
+      {
+        body: new URLSearchParams({
+          client_id: this.config.clientId,
+          client_secret: this.config.clientSecret,
+          code: input.code,
+          code_verifier: input.codeVerifier,
+          grant_type: 'authorization_code',
+          redirect_uri: this.config.redirectUri,
+        }),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        method: 'POST',
+      },
+      'token_exchange',
+    );
     if (!ok || !body || typeof body.access_token !== 'string') {
-      throw new GoogleOAuthError('OAUTH_PROVIDER_FAILURE', 'Google token exchange failed');
+      throw new GoogleOAuthError(
+        'OAUTH_PROVIDER_FAILURE',
+        'Google token exchange failed',
+        'token_exchange',
+        providerErrorCode(body),
+        status,
+      );
     }
     const scope = typeof body.scope === 'string' ? body.scope.split(' ').filter(Boolean) : [];
     return {
@@ -632,11 +648,19 @@ export class HttpGoogleOAuthProvider implements GoogleOAuthProvider {
   }
 
   async getUserProfile(accessToken: string): Promise<GoogleUserProfile> {
-    const { body, ok } = await this.#fetchJson(userInfoEndpoint, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const { body, ok, status } = await this.#fetchJson(
+      userInfoEndpoint,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+      'profile_lookup',
+    );
     if (!ok || !body || typeof body.email !== 'string') {
-      throw new GoogleOAuthError('OAUTH_PROVIDER_FAILURE', 'Google profile lookup failed');
+      throw new GoogleOAuthError(
+        'OAUTH_PROVIDER_FAILURE',
+        'Google profile lookup failed',
+        'profile_lookup',
+        providerErrorCode(body),
+        status,
+      );
     }
     return { email: body.email, emailVerified: body.email_verified === true };
   }
@@ -644,15 +668,16 @@ export class HttpGoogleOAuthProvider implements GoogleOAuthProvider {
   async #fetchJson(
     url: string,
     init: RequestInit,
-  ): Promise<{ body: Record<string, unknown> | null; ok: boolean }> {
+    failureReason: GoogleOAuthFailureReason,
+  ): Promise<{ body: Record<string, unknown> | null; ok: boolean; status: number }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await this.fetchImplementation(url, { ...init, signal: controller.signal });
       const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-      return { body, ok: response.ok };
+      return { body, ok: response.ok, status: response.status };
     } catch {
-      throw new GoogleOAuthError('OAUTH_PROVIDER_FAILURE', 'Google request failed');
+      throw new GoogleOAuthError('OAUTH_PROVIDER_FAILURE', 'Google request failed', failureReason);
     } finally {
       clearTimeout(timeout);
     }
@@ -785,6 +810,23 @@ function scopesForPurpose(purpose: GoogleOAuthPurpose): readonly string[] {
     default:
       return googleOAuthScopes;
   }
+}
+
+function requiredApiScopesForPurpose(purpose: GoogleOAuthPurpose): readonly string[] {
+  switch (purpose) {
+    case 'gmail_compose':
+      return [gmailReadonlyScope, gmailComposeScope];
+    case 'calendar_events':
+      return [gmailReadonlyScope, calendarEventsScope];
+    default:
+      return [gmailReadonlyScope];
+  }
+}
+
+function providerErrorCode(body: Record<string, unknown> | null): string | undefined {
+  const error = body?.error;
+  if (typeof error !== 'string') return undefined;
+  return /^[a-z_]{1,64}$/u.test(error) ? error : undefined;
 }
 
 function isUuid(value: string): boolean {
