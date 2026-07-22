@@ -42,9 +42,9 @@ Extraction rules:
 - A non-job-related result must use category not_job_related, needsReply false, replyIntent none,
   null company/contact/meeting fields, an empty missingRequiredInformation array, and urlType none.`;
 
-export const jobEmailReplyPromptVersion = '2026-07-20.v1';
-export const jobEmailReplySchemaName = 'job_email_reply';
-export const jobEmailReplySchemaVersion = '1';
+export const jobEmailDraftToolPromptVersion = '2026-07-22.v1';
+export const jobEmailDraftToolSchemaName = 'job_email_draft_tool_completion';
+export const jobEmailDraftToolSchemaVersion = '1';
 export const jobEmailDraftPolicyVersion = '2026-07-20.v1';
 export const jobEmailCalendarPolicyVersion = '2026-07-20.v1';
 export const jobEmailReplySystemPrompt = `Write a concise, polite Japanese email reply.

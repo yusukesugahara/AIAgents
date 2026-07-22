@@ -26,6 +26,8 @@ import {
   OpenAiLlmProvider,
   type OpenAiStructuredClient,
   type OpenAiStructuredResponse,
+  type OpenAiToolTurnRequest,
+  type OpenAiToolTurnResponse,
 } from '@ai-agents/llm';
 import { createApp } from '../../api/src/app';
 import { startWorker, type WorkerHandle } from './worker';
@@ -110,64 +112,82 @@ class FakeGoogleCalendar implements GoogleCalendarClient {
 }
 
 class FakeStructuredClient implements OpenAiStructuredClient {
-  readonly responses: OpenAiStructuredResponse[] = [
-    {
-      model: 'fake-analysis-model',
-      output: [{ content: [{ parsed: completedAnalysis, type: 'output_text' }], type: 'message' }],
-      status: 'completed',
-      usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
-    },
-    {
-      model: 'fake-reply-model',
-      output: [
-        {
-          content: [
-            {
-              parsed: { body: 'ご連絡ありがとうございます。', confidence: 0.98, warnings: [] },
-              type: 'output_text',
-            },
-          ],
-          type: 'message',
-        },
-      ],
-      status: 'completed',
-      usage: { input_tokens: 80, output_tokens: 20, total_tokens: 100 },
-    },
+  readonly responses: OpenAiToolTurnResponse[] = [
+    toolCallResponse('fake-analysis-model', 'get_email_thread', 'analysis-thread-1', {}),
+    toolCallResponse('fake-analysis-model', 'get_agent_context', 'analysis-context-1', {}),
+    parsedToolResponse('fake-analysis-model', completedAnalysis),
+    toolCallResponse('fake-reply-model', 'create_reply_draft', 'reply-draft-1', {
+      body: 'ご連絡ありがとうございます。',
+      confidence: 0.98,
+      warnings: [],
+    }),
+    parsedToolResponse('fake-reply-model', { status: 'completed' }),
     {
       model: 'fake-analysis-model',
       output: [{ content: [{ refusal: 'Policy refusal', type: 'refusal' }], type: 'message' }],
+      rawOutput: [{ id: 'refusal-1', type: 'message' }],
       status: 'completed',
       usage: { input_tokens: 80, output_tokens: 5, total_tokens: 85 },
     },
-    {
-      model: 'fake-analysis-model',
-      output: [{ content: [{ parsed: completedAnalysis, type: 'output_text' }], type: 'message' }],
-      status: 'completed',
-      usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
-    },
-    {
-      model: 'fake-reply-model',
-      output: [
-        {
-          content: [
-            {
-              parsed: { body: 'ご連絡ありがとうございます。', confidence: 0.98, warnings: [] },
-              type: 'output_text',
-            },
-          ],
-          type: 'message',
-        },
-      ],
-      status: 'completed',
-      usage: { input_tokens: 80, output_tokens: 20, total_tokens: 100 },
-    },
+    toolCallResponse('fake-analysis-model', 'get_email_thread', 'analysis-thread-2', {}),
+    toolCallResponse('fake-analysis-model', 'get_agent_context', 'analysis-context-2', {}),
+    parsedToolResponse('fake-analysis-model', completedAnalysis),
+    toolCallResponse('fake-reply-model', 'create_reply_draft', 'reply-draft-2', {
+      body: 'ご連絡ありがとうございます。',
+      confidence: 0.98,
+      warnings: [],
+    }),
+    parsedToolResponse('fake-reply-model', { status: 'completed' }),
   ];
 
   async parse(): Promise<OpenAiStructuredResponse> {
+    throw new Error('Structured parse was not expected');
+  }
+
+  async createToolTurn(_request: OpenAiToolTurnRequest): Promise<OpenAiToolTurnResponse> {
     const response = this.responses.shift();
-    if (!response) throw new Error('No Fake OpenAI response remains');
+    if (!response) throw new Error('No Fake OpenAI tool response remains');
     return response;
   }
+}
+
+function toolCallResponse(
+  model: string,
+  name: string,
+  callId: string,
+  arguments_: Record<string, unknown>,
+): OpenAiToolTurnResponse {
+  const rawCall = {
+    arguments: JSON.stringify(arguments_),
+    call_id: callId,
+    name,
+    type: 'function_call',
+  };
+  return {
+    model,
+    output: [
+      {
+        arguments: rawCall.arguments,
+        callId,
+        content: [],
+        name,
+        type: 'function_call',
+      },
+    ],
+    rawOutput: [rawCall],
+    status: 'completed',
+    usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+  };
+}
+
+function parsedToolResponse(model: string, parsed: unknown): OpenAiToolTurnResponse {
+  return {
+    model,
+    output: [{ content: [{ parsed, type: 'output_text' }], type: 'message' }],
+    rawOutput: [{ id: `message-${model}`, type: 'message' }],
+    status: 'completed',
+    usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+  };
 }
 
 function message(id: string): EmailMessage {
@@ -354,7 +374,7 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
       expect((await runs.getSteps(completedRun.id)).map((step) => step.stepName)).toEqual([
         'FETCH_EMAIL_THREAD',
         'ANALYZE_EMAIL',
-        'GENERATE_REPLY',
+        'CHECK_REPLY_POLICY',
         'CHECK_CALENDAR_POLICY',
         'CREATE_DRAFT',
         'CREATE_CALENDAR_EVENT',
@@ -363,7 +383,7 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
       expect((await runs.getSteps(replayRun.id)).map((step) => step.stepName)).toEqual([
         'FETCH_EMAIL_THREAD',
         'ANALYZE_EMAIL',
-        'GENERATE_REPLY',
+        'CHECK_REPLY_POLICY',
         'CHECK_CALENDAR_POLICY',
         'CREATE_DRAFT',
         'CREATE_CALENDAR_EVENT',
@@ -419,7 +439,7 @@ describe.skipIf(!integrationEnabled || !databaseUrl)('Job Search Email Worker in
       expect(countRows[0]).toEqual({
         calendar_count: 1,
         draft_count: 1,
-        invocation_count: 5,
+        invocation_count: 3,
         refused_analysis_count: 0,
         review_count: 1,
       });

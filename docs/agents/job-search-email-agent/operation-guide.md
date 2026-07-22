@@ -35,10 +35,10 @@
 | Step | 意味 |
 |---|---|
 | `FETCH_EMAIL_THREAD` | Gmailから対象メールとスレッドを取得。件名もここへ保存 |
-| `ANALYZE_EMAIL` | LLMでメール種別、返信要否、面談情報を構造化 |
-| `GENERATE_REPLY` | 下書き内容または要確認理由を判定 |
+| `ANALYZE_EMAIL` | 読み取りToolを使ってメール種別、返信要否、面談情報を構造化 |
+| `CHECK_REPLY_POLICY` | 下書きToolを許可できるか事前判定 |
 | `CHECK_CALENDAR_POLICY` | Calendar登録の安全条件と競合を確認 |
-| `CREATE_DRAFT` | Gmail APIで下書きを作成または既存下書きを確認 |
+| `CREATE_DRAFT` | Function Callingで安全な下書きToolを実行し、Gmail Draftを作成または再利用 |
 | `CREATE_CALENDAR_EVENT` | 必要時のみCalendar予定を作成 |
 
 `CREATE_DRAFT` が成功し、`Gmail Draft ID` が表示された場合、Gmail APIへの作成または既存下書きの確認が完了しています。DBに過去のDraft IDがあっても、Gmailに実在しない場合は再作成します。

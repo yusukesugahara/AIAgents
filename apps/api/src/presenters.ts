@@ -131,6 +131,7 @@ function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
     'outcome',
     'result',
     'reviewReason',
+    'writeStatus',
   ] as const;
   const safeBooleanKeys = ['applicable', 'isJobRelated', 'retryable'] as const;
   const safeOutput: Record<string, unknown> = {};
@@ -142,12 +143,24 @@ function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
     const field = output[key];
     if (typeof field === 'boolean') safeOutput[key] = field;
   }
+  for (const key of ['messageCount', 'toolCallCount'] as const) {
+    const field = output[key];
+    if (typeof field === 'number' && Number.isSafeInteger(field) && field >= 0) {
+      safeOutput[key] = field;
+    }
+  }
+  const allowedToolNames = new Set([
+    'create_reply_draft',
+    'create_scheduling_placeholder_draft',
+    'get_agent_context',
+    'get_email_thread',
+  ]);
   if (
-    typeof output.messageCount === 'number' &&
-    Number.isSafeInteger(output.messageCount) &&
-    output.messageCount >= 0
+    Array.isArray(output.toolNames) &&
+    output.toolNames.length <= 8 &&
+    output.toolNames.every((name) => typeof name === 'string' && allowedToolNames.has(name))
   ) {
-    safeOutput.messageCount = output.messageCount;
+    safeOutput.toolNames = output.toolNames;
   }
   return safeOutput;
 }

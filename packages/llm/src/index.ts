@@ -46,6 +46,35 @@ export interface StructuredLlmRequest<TOutput> {
   readonly userInput: string;
 }
 
+export interface LlmFunctionTool {
+  readonly description: string;
+  readonly execute: (arguments_: unknown, context: LlmToolExecutionContext) => Promise<unknown>;
+  readonly maxCalls: number;
+  readonly name: string;
+  readonly parameters: Record<string, unknown>;
+  readonly schema: z.ZodType<unknown>;
+}
+
+export interface LlmToolExecutionContext {
+  readonly callId: string;
+  readonly signal?: AbortSignal;
+}
+
+export type LlmToolChoice = 'auto' | 'required' | { readonly name: string };
+
+export interface ToolLoopLlmRequest<TOutput> extends StructuredLlmRequest<TOutput> {
+  readonly initialToolChoice?: LlmToolChoice;
+  readonly maxToolCalls?: number;
+  readonly maxTurns?: number;
+  readonly requiredToolNames?: readonly string[];
+  readonly tools: readonly LlmFunctionTool[];
+}
+
+export interface LlmToolCallMetadata {
+  readonly callId: string;
+  readonly name: string;
+}
+
 export interface LlmInvocationMetadata {
   readonly attempts: number;
   readonly durationMs: number;
@@ -55,6 +84,7 @@ export interface LlmInvocationMetadata {
   readonly schemaName: string;
   readonly schemaVersion: string;
   readonly usage: LlmUsage;
+  readonly toolCalls?: readonly LlmToolCallMetadata[];
 }
 
 export type StructuredLlmResult<TOutput> =
@@ -73,6 +103,7 @@ export interface LlmProvider {
   generateStructured<TOutput>(
     request: StructuredLlmRequest<TOutput>,
   ): Promise<StructuredLlmResult<TOutput>>;
+  runToolLoop<TOutput>(request: ToolLoopLlmRequest<TOutput>): Promise<StructuredLlmResult<TOutput>>;
 }
 
 export interface OpenAiStructuredResponse {
@@ -104,6 +135,35 @@ export interface OpenAiStructuredClient {
     },
     options?: { readonly signal?: AbortSignal },
   ): Promise<OpenAiStructuredResponse>;
+  createToolTurn?(
+    request: OpenAiToolTurnRequest,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<OpenAiToolTurnResponse>;
+}
+
+export interface OpenAiToolTurnRequest {
+  readonly input: readonly unknown[];
+  readonly model: string;
+  readonly schema: z.ZodType<unknown>;
+  readonly schemaName: string;
+  readonly systemPrompt: string;
+  readonly toolChoice: LlmToolChoice;
+  readonly tools: readonly Pick<LlmFunctionTool, 'description' | 'name' | 'parameters'>[];
+}
+
+export interface OpenAiToolTurnResponse extends OpenAiStructuredResponse {
+  readonly output: readonly {
+    readonly arguments?: string;
+    readonly callId?: string;
+    readonly content: readonly {
+      readonly parsed?: unknown;
+      readonly refusal?: string;
+      readonly type: string;
+    }[];
+    readonly name?: string;
+    readonly type: string;
+  }[];
+  readonly rawOutput: readonly unknown[];
 }
 
 export interface OpenAiLlmProviderOptions {
@@ -120,9 +180,14 @@ interface AttemptResult<TOutput> {
   readonly model: string;
   readonly reason?: LlmNeedsReviewReason;
   readonly usage: LlmUsage;
+  readonly toolCalls?: readonly LlmToolCallMetadata[];
 }
 
 const defaultTimeoutMs = 30_000;
+const defaultMaximumToolCalls = 8;
+const defaultMaximumToolTurns = 10;
+const maximumToolOutputBytes = 1024 * 1024;
+const toolNamePattern = /^[A-Za-z0-9_-]{1,64}$/u;
 
 /**
  * Calls OpenAI's Responses API through a typed boundary and records only invocation metadata.
@@ -225,6 +290,218 @@ export class OpenAiLlmProvider implements LlmProvider {
     throw new Error('OpenAI structured output retry loop ended unexpectedly');
   }
 
+  async runToolLoop<TOutput>(
+    request: ToolLoopLlmRequest<TOutput>,
+  ): Promise<StructuredLlmResult<TOutput>> {
+    validateToolLoopRequest(request);
+    if (!this.#client?.createToolTurn) {
+      throw new AgentDependencyError(
+        'AUTHENTICATION_REQUIRED',
+        false,
+        'OpenAI API key is not configured',
+      );
+    }
+
+    const attemptStartedAt = this.#now();
+    let result: AttemptResult<TOutput>;
+    try {
+      result = await this.#runToolLoopAttempt(
+        request,
+        this.#client.createToolTurn.bind(this.#client),
+      );
+    } catch (error) {
+      const dependencyError = toOpenAiDependencyError(error);
+      await this.#record({
+        attempt: 1,
+        durationMs: durationBetween(attemptStartedAt, this.#now()),
+        model: request.model,
+        outcome: 'failed',
+        request,
+        reviewReason: null,
+        usage: emptyUsage,
+      });
+      throw dependencyError;
+    }
+
+    const outcome = result.reason ? 'needs_review' : 'completed';
+    const metadata = await this.#record({
+      attempt: 1,
+      durationMs: result.durationMs,
+      model: result.model,
+      outcome,
+      request,
+      reviewReason: result.reason ?? null,
+      ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
+      usage: result.usage,
+    });
+    if (result.reason) {
+      return { metadata, reason: result.reason, status: 'needs_review' };
+    }
+    return { data: result.data as TOutput, metadata, status: 'completed' };
+  }
+
+  async #runToolLoopAttempt<TOutput>(
+    request: ToolLoopLlmRequest<TOutput>,
+    createTurn: NonNullable<OpenAiStructuredClient['createToolTurn']>,
+  ): Promise<AttemptResult<TOutput>> {
+    const controller = new AbortController();
+    const startedAt = this.#now();
+    const externalSignal = request.signal;
+    let externalAbortHandler: (() => void) | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const input: unknown[] = [{ content: request.userInput, role: 'user' }];
+    const toolsByName = new Map(request.tools.map((tool) => [tool.name, tool]));
+    const requiredToolNames = new Set(request.requiredToolNames ?? []);
+    const calledToolNames = new Set<string>();
+    const toolCallCounts = new Map<string, number>();
+    const seenCallIds = new Set<string>();
+    const toolCalls: LlmToolCallMetadata[] = [];
+    let usage = emptyUsage;
+    let model = request.model;
+
+    try {
+      if (externalSignal?.aborted) throw new OpenAiCancelledError();
+      const timeoutError = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new OpenAiTimeoutError());
+        }, this.#timeoutMs);
+      });
+      const cancellationError = new Promise<never>((_, reject) => {
+        if (!externalSignal) return;
+        externalAbortHandler = () => {
+          controller.abort();
+          reject(new OpenAiCancelledError());
+        };
+        externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+      });
+
+      const maxTurns = request.maxTurns ?? defaultMaximumToolTurns;
+      const maxToolCalls = request.maxToolCalls ?? defaultMaximumToolCalls;
+      for (let turn = 0; turn < maxTurns; turn += 1) {
+        const remainingRequiredToolNames = [...requiredToolNames].filter(
+          (name) => !calledToolNames.has(name),
+        );
+        const toolChoice =
+          turn === 0 && request.initialToolChoice !== undefined
+            ? request.initialToolChoice
+            : remainingRequiredToolNames.length === 1
+              ? { name: remainingRequiredToolNames[0] as string }
+              : remainingRequiredToolNames.length > 1
+                ? 'required'
+                : 'auto';
+        const response = await Promise.race([
+          createTurn(
+            {
+              input,
+              model: request.model,
+              schema: request.schema as z.ZodType<unknown>,
+              schemaName: request.schemaName,
+              systemPrompt: request.systemPrompt,
+              toolChoice,
+              tools: request.tools,
+            },
+            { signal: controller.signal },
+          ),
+          timeoutError,
+          cancellationError,
+        ]);
+        model = response.model ?? model;
+        usage = addUsage(usage, normalizeUsage(response.usage));
+        if (response.status && response.status !== 'completed') {
+          return invalidToolLoopAttempt(startedAt, this.#now(), model, usage, toolCalls);
+        }
+        if (findRefusal(response)) {
+          return {
+            durationMs: durationBetween(startedAt, this.#now()),
+            model,
+            reason: 'refusal',
+            toolCalls,
+            usage,
+          };
+        }
+
+        input.push(...response.rawOutput);
+        const calls = response.output.filter((item) => item.type === 'function_call');
+        if (calls.length === 0) {
+          if (!response.output.some((item) => item.type === 'message')) {
+            continue;
+          }
+          const hasEveryRequiredTool = [...requiredToolNames].every((name) =>
+            calledToolNames.has(name),
+          );
+          const validated = request.schema.safeParse(findParsedOutput(response));
+          if (!hasEveryRequiredTool || !validated.success) {
+            return invalidToolLoopAttempt(startedAt, this.#now(), model, usage, toolCalls);
+          }
+          return {
+            data: validated.data,
+            durationMs: durationBetween(startedAt, this.#now()),
+            model,
+            toolCalls,
+            usage,
+          };
+        }
+
+        if (toolCalls.length + calls.length > maxToolCalls) {
+          return invalidToolLoopAttempt(startedAt, this.#now(), model, usage, toolCalls);
+        }
+        const batchCallIds = new Set<string>();
+        const projectedCallCounts = new Map(toolCallCounts);
+        const validatedCalls: Array<{
+          readonly arguments: unknown;
+          readonly callId: string;
+          readonly tool: LlmFunctionTool;
+        }> = [];
+        for (const call of calls) {
+          if (!call.name || !call.callId || typeof call.arguments !== 'string') {
+            return invalidToolLoopAttempt(startedAt, this.#now(), model, usage, toolCalls);
+          }
+          if (seenCallIds.has(call.callId) || batchCallIds.has(call.callId)) {
+            return invalidToolLoopAttempt(startedAt, this.#now(), model, usage, toolCalls);
+          }
+          const tool = toolsByName.get(call.name);
+          const parsedArguments = parseJson(call.arguments);
+          const validatedArguments = tool?.schema.safeParse(parsedArguments);
+          if (!tool || !validatedArguments?.success) {
+            return invalidToolLoopAttempt(startedAt, this.#now(), model, usage, toolCalls);
+          }
+          const projectedCallCount = (projectedCallCounts.get(tool.name) ?? 0) + 1;
+          if (projectedCallCount > tool.maxCalls) {
+            return invalidToolLoopAttempt(startedAt, this.#now(), model, usage, toolCalls);
+          }
+          projectedCallCounts.set(tool.name, projectedCallCount);
+          batchCallIds.add(call.callId);
+          validatedCalls.push({
+            arguments: validatedArguments.data,
+            callId: call.callId,
+            tool,
+          });
+        }
+        for (const call of validatedCalls) {
+          const output = await call.tool.execute(call.arguments, {
+            callId: call.callId,
+            ...(externalSignal ? { signal: externalSignal } : {}),
+          });
+          const callCount = (toolCallCounts.get(call.tool.name) ?? 0) + 1;
+          toolCallCounts.set(call.tool.name, callCount);
+          calledToolNames.add(call.tool.name);
+          seenCallIds.add(call.callId);
+          toolCalls.push({ callId: call.callId, name: call.tool.name });
+          input.push({
+            call_id: call.callId,
+            output: serializeToolOutput(output),
+            type: 'function_call_output',
+          });
+        }
+      }
+      return invalidToolLoopAttempt(startedAt, this.#now(), model, usage, toolCalls);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (externalAbortHandler) externalSignal?.removeEventListener('abort', externalAbortHandler);
+    }
+  }
+
   async #generateAttempt<TOutput>(
     request: StructuredLlmRequest<TOutput>,
     client: OpenAiStructuredClient,
@@ -301,6 +578,7 @@ export class OpenAiLlmProvider implements LlmProvider {
     readonly outcome: LlmInvocationOutcome;
     readonly request: StructuredLlmRequest<TOutput>;
     readonly reviewReason: LlmNeedsReviewReason | null;
+    readonly toolCalls?: readonly LlmToolCallMetadata[];
     readonly usage: LlmUsage;
   }): Promise<LlmInvocationMetadata> {
     const estimatedCostUsd = estimateOpenAiCostUsd(input.model, input.usage);
@@ -339,6 +617,7 @@ export class OpenAiLlmProvider implements LlmProvider {
       promptVersion: input.request.promptVersion,
       schemaName: input.request.schemaName,
       schemaVersion: input.request.schemaVersion,
+      ...(input.toolCalls ? { toolCalls: input.toolCalls } : {}),
       usage: input.usage,
     };
   }
@@ -395,6 +674,86 @@ class OpenAiSdkClient implements OpenAiStructuredClient {
             : [],
         type: output.type,
       })),
+      ...(response.status ? { status: response.status } : {}),
+      ...(response.usage
+        ? {
+            usage: {
+              input_tokens: response.usage.input_tokens,
+              output_tokens: response.usage.output_tokens,
+              total_tokens: response.usage.total_tokens,
+            },
+          }
+        : {}),
+    };
+  }
+
+  async createToolTurn(
+    request: OpenAiToolTurnRequest,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<OpenAiToolTurnResponse> {
+    let format: ReturnType<typeof zodTextFormat>;
+    try {
+      format = zodTextFormat(request.schema, request.schemaName);
+    } catch (error) {
+      throw new AgentDependencyError(
+        'INVALID_REQUEST',
+        false,
+        'OpenAI structured output schema is invalid',
+        { cause: error },
+      );
+    }
+    const toolChoice =
+      typeof request.toolChoice === 'object'
+        ? { name: request.toolChoice.name, type: 'function' as const }
+        : request.toolChoice;
+    const response = await this.client.responses.create(
+      {
+        include: ['reasoning.encrypted_content'],
+        input: request.input as never,
+        instructions: request.systemPrompt,
+        model: request.model,
+        parallel_tool_calls: false,
+        ...(request.model === 'gpt-5.6-luna' ? { reasoning: { effort: 'low' as const } } : {}),
+        store: false,
+        text: { format },
+        tool_choice: toolChoice,
+        tools: request.tools.map((tool) => ({
+          description: tool.description,
+          name: tool.name,
+          parameters: tool.parameters,
+          strict: true,
+          type: 'function' as const,
+        })) as never,
+      },
+      options,
+    );
+
+    return {
+      model: response.model,
+      output: response.output.map((output) => {
+        if (output.type === 'function_call') {
+          return {
+            arguments: output.arguments,
+            callId: output.call_id,
+            content: [],
+            name: output.name,
+            type: output.type,
+          };
+        }
+        return {
+          content:
+            output.type === 'message'
+              ? output.content.map((content) => {
+                  if (content.type === 'output_text') {
+                    return { parsed: parseJson(content.text), type: content.type };
+                  }
+                  return { refusal: content.refusal, type: content.type };
+                })
+              : [],
+          type: output.type,
+        };
+      }),
+      rawOutput: response.output,
       ...(response.status ? { status: response.status } : {}),
       ...(response.usage
         ? {
@@ -516,6 +875,48 @@ function normalizeUsage(usage: OpenAiStructuredResponse['usage']): LlmUsage {
   return { inputTokens, outputTokens, totalTokens };
 }
 
+function addUsage(left: LlmUsage, right: LlmUsage): LlmUsage {
+  return {
+    inputTokens: left.inputTokens + right.inputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+  };
+}
+
+function invalidToolLoopAttempt<TOutput>(
+  startedAt: Date,
+  completedAt: Date,
+  model: string,
+  usage: LlmUsage,
+  toolCalls: readonly LlmToolCallMetadata[],
+): AttemptResult<TOutput> {
+  return {
+    durationMs: durationBetween(startedAt, completedAt),
+    model,
+    reason: 'invalid_output',
+    toolCalls,
+    usage,
+  };
+}
+
+function serializeToolOutput(value: unknown): string {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    throw new AgentDependencyError('INVALID_RESPONSE', false, 'LLM tool output is invalid', {
+      cause: error,
+    });
+  }
+  if (serialized === undefined) {
+    throw new AgentDependencyError('INVALID_RESPONSE', false, 'LLM tool returned no output');
+  }
+  if (Buffer.byteLength(serialized, 'utf8') > maximumToolOutputBytes) {
+    throw new AgentDependencyError('INVALID_RESPONSE', false, 'LLM tool output is too large');
+  }
+  return serialized;
+}
+
 function nonNegativeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
@@ -598,5 +999,48 @@ function validateRequest<TOutput>(request: StructuredLlmRequest<TOutput>): void 
   }
   if (!request.schema || typeof request.schema.safeParse !== 'function') {
     throw new AgentDependencyError('INVALID_REQUEST', false, 'LLM schema is invalid');
+  }
+}
+
+function validateToolLoopRequest<TOutput>(request: ToolLoopLlmRequest<TOutput>): void {
+  validateRequest(request);
+  if (!Array.isArray(request.tools) || request.tools.length === 0) {
+    throw new AgentDependencyError('INVALID_REQUEST', false, 'LLM tools must not be empty');
+  }
+  const names = new Set<string>();
+  for (const tool of request.tools) {
+    if (
+      !toolNamePattern.test(tool.name) ||
+      !tool.description?.trim() ||
+      !Number.isSafeInteger(tool.maxCalls) ||
+      tool.maxCalls <= 0 ||
+      names.has(tool.name) ||
+      !tool.schema ||
+      typeof tool.schema.safeParse !== 'function' ||
+      !tool.parameters ||
+      typeof tool.parameters !== 'object' ||
+      typeof tool.execute !== 'function'
+    ) {
+      throw new AgentDependencyError('INVALID_REQUEST', false, 'LLM tool definition is invalid');
+    }
+    names.add(tool.name);
+  }
+  if ((request.requiredToolNames ?? []).some((name) => !names.has(name))) {
+    throw new AgentDependencyError('INVALID_REQUEST', false, 'Required LLM tool is not defined');
+  }
+  if (typeof request.initialToolChoice === 'object' && !names.has(request.initialToolChoice.name)) {
+    throw new AgentDependencyError('INVALID_REQUEST', false, 'Selected LLM tool is not defined');
+  }
+  for (const [label, value] of Object.entries({
+    maxToolCalls: request.maxToolCalls ?? defaultMaximumToolCalls,
+    maxTurns: request.maxTurns ?? defaultMaximumToolTurns,
+  })) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new AgentDependencyError(
+        'INVALID_REQUEST',
+        false,
+        `LLM ${label} must be a positive integer`,
+      );
+    }
   }
 }

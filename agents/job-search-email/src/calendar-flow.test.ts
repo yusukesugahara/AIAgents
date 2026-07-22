@@ -31,11 +31,10 @@ describe('Job Search Email Calendar flow', () => {
       gmailThreadId: 'thread-1',
     });
 
-    const userInput = dependencies.llm.requests[0]?.userInput;
-    expect(typeof userInput).toBe('string');
-    expect(JSON.parse(String(userInput))).toMatchObject({
-      EMAIL_THREAD_DATA: { defaultTimezone: 'America/New_York' },
-    });
+    expect(
+      dependencies.llm.toolExecutions.find((execution) => execution.name === 'get_agent_context')
+        ?.output,
+    ).toEqual({ defaultTimezone: 'America/New_York' });
   });
 
   test('creates one primary Calendar event for a confirmed Web meeting without a reply', async () => {
@@ -109,6 +108,10 @@ describe('Job Search Email Calendar flow', () => {
     expect(dependencies.reviews.saved[0]?.reason).toBe('calendar_conflict');
     expect(dependencies.gmailDrafts.created).toHaveLength(0);
     expect(dependencies.calendar.created).toHaveLength(0);
+    expect(dependencies.llm.toolExecutions.map((execution) => execution.name)).toEqual([
+      'get_email_thread',
+      'get_agent_context',
+    ]);
     expect(
       steps.completed.find((step) => step.stepName === 'CHECK_CALENDAR_POLICY')?.output,
     ).toEqual({

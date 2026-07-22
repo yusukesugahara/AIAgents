@@ -7,7 +7,7 @@ import type { JobSearchEmailOutput } from './schemas';
 const jobEmailStepSequence = {
   FETCH_EMAIL_THREAD: 10,
   ANALYZE_EMAIL: 20,
-  GENERATE_REPLY: 30,
+  CHECK_REPLY_POLICY: 30,
   CHECK_CALENDAR_POLICY: 40,
   CREATE_DRAFT: 50,
   CREATE_CALENDAR_EVENT: 60,

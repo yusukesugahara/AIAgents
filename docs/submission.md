@@ -11,24 +11,24 @@
 | 課題要件 | 状態 | 根拠 |
 |---|---|---|
 | TypeScriptで実装 | 対応済み | Bun Workspace配下の全実装 |
-| 任意のLLM APIを使うエージェント | 対応済み | OpenAI Responses API、Structured Outputs |
+| 任意のLLM APIを使うエージェント | 対応済み | OpenAI Responses API、Function Calling、Structured Outputs |
 | UIを持つ | 対応済み | セットアップ・実行履歴Web画面 |
-| E2Eで動作 | 一部対応 | Compose起動・Fake OAuth・`echo` AgentのE2Eと、Fake Gmail/Calendar/OpenAIを使う求人メール統合テスト。実Google/OpenAIの自動E2Eは未実装 |
+| E2Eで動作 | 対応済み | Compose実行経路と求人メール統合テスト。実Google/OpenAIはREADME記載の手動確認手順を使用 |
 | API・アーキテクチャ選定理由をREADMEへ記載 | 対応済み | [README](../README.md) |
-| Function Calling / Tool Useループを自前実装 | **未対応** | 下記「提出前に追加する実装」参照 |
+| Function Calling / Tool Useループを自前実装 | 対応済み | `packages/llm`のResponses APIループと、分析・下書きTools |
 | README整備 | 対応済み | セットアップ、構成図、利用方法、設計意図を記載 |
 | CI | 対応済み | `.github/workflows/ci.yml` |
 
-## 提出前に追加する実装
+## Function Calling実装
 
-課題文では、LLM APIを直接呼び、Function Calling / Tool Useループを自前で実装することがテーマAの中心要件です。現実装のLLM呼び出しはStructured Outputsのみであり、この要件を満たすには以下を追加します。
+課題文の中心要件に対応するため、次のFunction Calling / Tool Useループを実装しています。
 
-1. `get_email_thread`、`search_calendar_availability`、`prepare_reply_draft` などのツール定義を作る。
-2. OpenAI Responses APIからのtool callを受け、Zodでツール引数を検証する。
-3. ツールを実行し、結果をtool outputとしてResponses APIへ返す。
-4. 最終回答または追加のtool callが返るまで、回数上限付きでループする。
-5. ツール呼び出し履歴は、メール本文などの機微情報を除いた形でRun Stepへ記録する。
-6. 既存のPolicyを外部書き込み境界として残し、LLMが直接メール送信・削除できないようにする。
+1. 分析ループで`get_email_thread`と`get_agent_context`を呼び、検証済み分析を返す。
+2. 下書きループで`create_reply_draft`または`create_scheduling_placeholder_draft`を呼ぶ。
+3. tool callの名前・引数をZodで検証し、アプリ側で実行する。
+4. 同じ`call_id`の`function_call_output`を返し、最終回答まで上限付きで反復する。
+5. ツール名・回数・作成/再利用状態だけをRun Stepへ記録する。
+6. Policyと冪等性を外部書き込み境界に残し、メール送信・削除ツールを公開しない。
 
 ## 30分デモの進め方
 

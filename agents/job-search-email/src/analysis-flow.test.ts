@@ -35,13 +35,19 @@ describe('Job Search Email analysis flow', () => {
       { googleConnectionId: connectionId, gmailThreadId: 'thread-1' },
     ]);
     expect(dependencies.llm.requests[0]).toMatchObject({
+      initialToolChoice: 'required',
+      maxToolCalls: 2,
       model: 'test-model',
       promptVersion: jobEmailAnalysisPromptVersion,
       runId: context().runId,
       schemaName: jobEmailAnalysisSchemaName,
       schemaVersion: jobEmailAnalysisSchemaVersion,
-      systemPrompt: jobEmailAnalysisSystemPrompt,
     });
+    expect(dependencies.llm.requests[0]?.systemPrompt).toContain(jobEmailAnalysisSystemPrompt);
+    expect(dependencies.llm.toolExecutions.map((execution) => execution.name)).toEqual([
+      'get_email_thread',
+      'get_agent_context',
+    ]);
     expect(dependencies.analyses.saved[0]).toMatchObject({
       googleConnectionId: connectionId,
       gmailMessageId: 'message-1',

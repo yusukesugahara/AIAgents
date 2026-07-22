@@ -97,7 +97,13 @@ describe('API Run routes', () => {
         errorCode: null,
         id: '0198be1d-a3a9-7d34-9bc3-123456789abe',
         input: { body: 'private Gmail content' },
-        output: { draftId: 'draft-1', recipient: 'private@example.com' },
+        output: {
+          draftId: 'draft-1',
+          recipient: 'private@example.com',
+          toolCallCount: 1,
+          toolNames: ['create_reply_draft'],
+          writeStatus: 'created',
+        },
         runId,
         sequence: 50,
         startedAt: now,
@@ -113,6 +119,7 @@ describe('API Run routes', () => {
           draftId: { secret: 'private nested detail' },
           providerDetail: 'private detail',
           retryable: true,
+          toolNames: ['send_email'],
         },
         runId,
         sequence: 20,
@@ -142,7 +149,12 @@ describe('API Run routes', () => {
           },
           {
             errorCode: null,
-            output: { draftId: 'draft-1' },
+            output: {
+              draftId: 'draft-1',
+              toolCallCount: 1,
+              toolNames: ['create_reply_draft'],
+              writeStatus: 'created',
+            },
             sequence: 50,
             status: 'succeeded',
             stepName: 'CREATE_DRAFT',
@@ -151,6 +163,7 @@ describe('API Run routes', () => {
       },
     });
     expect(JSON.stringify(body)).not.toContain('private');
+    expect(JSON.stringify(body)).not.toContain('send_email');
 
     const jobResponse = await app.request(`/jobs/${jobId}`);
     const jobBody = await jobResponse.json();
