@@ -1,11 +1,17 @@
 import type {
   AgentRegistry,
+  AgentRunHistoryRepository,
   AgentRunRepository,
   AgentRunStepRepository,
   JobQueue,
 } from '@ai-agents/agent-core';
-import type { DatabaseConnection } from '@ai-agents/database';
-import type { GoogleOAuthService } from '@ai-agents/google-oauth';
+import type { GmailPollingRuntimeConfig } from '@ai-agents/config';
+import type { GmailDraftWriter, GmailReader } from '@ai-agents/connector-google';
+import type { DatabaseConnection, PostgresJobEmailSettingsRepository } from '@ai-agents/database';
+import type {
+  GoogleConnectionSummaryRepository,
+  GoogleOAuthService,
+} from '@ai-agents/google-oauth';
 
 export interface ApiEnvironment {
   Variables: {
@@ -19,6 +25,7 @@ export interface ApiLogger {
 }
 
 export type ApiRunRepository = Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> &
+  AgentRunHistoryRepository &
   Partial<Pick<AgentRunStepRepository, 'getSteps'>>;
 
 export interface ApiAppOptions {
@@ -26,7 +33,15 @@ export interface ApiAppOptions {
   database?: Pick<DatabaseConnection, 'isReady'> &
     Partial<Pick<DatabaseConnection, 'isSchemaReady'>>;
   logger?: ApiLogger;
+  googleConnections?: GoogleConnectionSummaryRepository;
   googleOAuth?: Pick<GoogleOAuthService, 'begin' | 'cancel' | 'complete'>;
+  gmail?: Pick<GmailReader, 'getMessage' | 'listMessages'>;
+  gmailDrafts?: Pick<GmailDraftWriter, 'createReplyDraft' | 'findReplyDraft'>;
+  gmailPolling?: Pick<GmailPollingRuntimeConfig, 'maxMessages' | 'maxResults' | 'query'>;
+  jobEmailSettings?: Pick<
+    PostgresJobEmailSettingsRepository,
+    'getReplySettings' | 'saveReplySettings'
+  >;
   oauthRequired?: boolean;
   oauthCookieSecure?: boolean;
   queue?: JobQueue;

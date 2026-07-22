@@ -47,7 +47,7 @@ const claimedJobColumns = `
 export interface PostgresJobQueueOptions {
   readonly lockTimeoutMs?: number;
   readonly maxAttempts?: number;
-  /** Retry waits; with the default maxAttempts=3, attempts include the initial run, so 1s and 2s apply. */
+  /** Retry waits; attempts include the initial run. Defaults are 30 seconds and 5 minutes. */
   readonly retryDelaysMs?: readonly number[];
 }
 
@@ -62,7 +62,7 @@ export class PostgresJobQueue implements JobQueue {
   ) {
     this.#lockTimeoutMs = options.lockTimeoutMs ?? 60_000;
     this.#maxAttempts = options.maxAttempts ?? 3;
-    this.#retryDelaysMs = options.retryDelaysMs ?? [1_000, 2_000];
+    this.#retryDelaysMs = options.retryDelaysMs ?? [30_000, 300_000];
 
     if (!Number.isSafeInteger(this.#lockTimeoutMs) || this.#lockTimeoutMs <= 0) {
       throw new Error('Job lock timeout must be a positive integer');
@@ -97,6 +97,26 @@ export class PostgresJobQueue implements JobQueue {
 
     if (!input.idempotencyKey) {
       throw new Error('Failed to enqueue Job');
+    }
+
+    if (input.retryFailed) {
+      const [requeued] = (await this.database.client`
+        UPDATE agent_jobs
+        SET status = 'queued', attempts = 0, available_at = ${availableAt},
+            locked_at = NULL, locked_by = NULL, last_error_code = NULL, last_error = NULL,
+            completed_at = NULL
+        WHERE agent_id = ${input.agentId}
+          AND idempotency_key = ${input.idempotencyKey}
+          AND input_json = ${inputJson}::jsonb
+          AND trigger_type = ${input.triggerType}
+          AND requested_available_at IS NOT DISTINCT FROM ${requestedAvailableAt}::timestamptz
+          AND status = 'failed'
+          AND last_error_code IN (
+            'RATE_LIMITED', 'TEMPORARY_UNAVAILABLE', 'JOB_LOCK_EXPIRED', 'JOB_RETRYABLE'
+          )
+        RETURNING ${this.database.client.unsafe(jobColumns)}
+      `) as AgentJobRow[];
+      if (requeued) return toAgentJob(requeued);
     }
 
     const [existing] = (await this.database.client`

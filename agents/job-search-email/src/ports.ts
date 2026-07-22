@@ -35,6 +35,7 @@ export interface JobEmailAnalysisRepository {
 }
 
 export type JobEmailReviewReason =
+  | 'analysis_not_grounded'
   | 'llm_invalid_output'
   | 'llm_refusal'
   | 'reply_analysis_low_confidence'
@@ -51,7 +52,10 @@ export type JobEmailReviewReason =
   | 'calendar_information_missing'
   | 'calendar_low_confidence'
   | 'calendar_permission_missing'
+  | 'calendar_policy_changed'
   | 'calendar_settings_missing';
+
+export type JobEmailReplyNotApplicableReason = 'reply_creation_disabled' | 'reply_not_required';
 
 export interface JobEmailReviewRequestRepository {
   createReviewRequest(input: {
@@ -102,6 +106,14 @@ export interface JobEmailDraftRepository {
     readonly jobId: string;
     readonly runId: string;
   }): Promise<JobEmailDraftReservation>;
+  /** Reopens a completed reservation only after Gmail confirms its Draft is gone. */
+  reopen(input: {
+    readonly googleConnectionId: string;
+    readonly gmailMessageId: string;
+    readonly idempotencyKey: string;
+    readonly jobId: string;
+    readonly runId: string;
+  }): Promise<void>;
 }
 
 export interface JobEmailCalendarEventReservation {

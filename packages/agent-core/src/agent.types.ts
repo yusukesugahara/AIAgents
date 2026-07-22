@@ -45,6 +45,10 @@ export interface AgentRun {
   readonly status: 'running' | 'completed' | 'failed';
   readonly triggerType: string;
   readonly errorCode: string | null;
+  /** A persistence-layer error message. Consumers must treat this as sensitive by default. */
+  readonly errorMessage?: string | null;
+  /** Subject captured from the completed Gmail fetch step, when available. */
+  readonly emailSubject?: string | null;
   readonly startedAt: Date;
   readonly completedAt: Date | null;
   readonly output?: unknown | null;
@@ -94,6 +98,21 @@ export interface AgentRunRepository {
   failRun(run: AgentRunFailure): Promise<void>;
   getLatestRunForJob(jobId: string): Promise<AgentRun | null>;
   getRun(runId: string): Promise<AgentRun | null>;
+}
+
+export interface AgentRunListOptions {
+  readonly limit: number;
+  readonly offset: number;
+}
+
+export interface AgentRunListPage {
+  readonly hasMore: boolean;
+  readonly runs: readonly AgentRun[];
+}
+
+export interface AgentRunHistoryRepository {
+  /** Returns Runs in reverse chronological order using startedAt and id as the stable sort key. */
+  listRuns(options: AgentRunListOptions): Promise<AgentRunListPage>;
 }
 
 export interface AgentRunStepRepository {

@@ -2,6 +2,7 @@ import { createDevelopmentAgentRegistry } from '@ai-agents/agent-composition';
 import type {
   AgentJob,
   AgentRun,
+  AgentRunHistoryRepository,
   AgentRunRepository,
   AgentRunStep,
   ClaimNextJobInput,
@@ -12,6 +13,7 @@ import type {
   JobQueue,
   ReleaseJobInput,
 } from '@ai-agents/agent-core';
+import type { ApiRunRepository } from './api-types';
 import { createApp } from './app';
 
 export const now = new Date('2026-07-19T00:00:00.000Z');
@@ -50,8 +52,10 @@ export class FakeJobQueue implements JobQueue {
 
     this.enqueued.push(input);
     const job = createJob({
+      agentId: input.agentId,
       idempotencyKey: input.idempotencyKey ?? null,
       input: input.input,
+      triggerType: input.triggerType,
     });
     this.jobs.set(job.id, job);
     return job;
@@ -81,7 +85,7 @@ export class FakeJobQueue implements JobQueue {
 }
 
 export class FakeRunRepository
-  implements Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'>
+  implements Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'>, AgentRunHistoryRepository
 {
   readonly runs = new Map<string, AgentRun>();
   readonly steps = new Map<string, readonly AgentRunStep[]>();
@@ -98,19 +102,23 @@ export class FakeRunRepository
     );
   }
 
+  async listRuns(options: { limit: number; offset: number }) {
+    const sorted = [...this.runs.values()].sort(
+      (left, right) =>
+        right.startedAt.getTime() - left.startedAt.getTime() || right.id.localeCompare(left.id),
+    );
+    return {
+      hasMore: sorted.length > options.offset + options.limit,
+      runs: sorted.slice(options.offset, options.offset + options.limit),
+    };
+  }
+
   async getSteps(id: string): Promise<readonly AgentRunStep[]> {
     return this.steps.get(id) ?? [];
   }
 }
 
-export function createConfiguredApp(
-  options: {
-    queue?: JobQueue;
-    runs?: Pick<AgentRunRepository, 'getLatestRunForJob' | 'getRun'> & {
-      getSteps?(targetRunId: string): Promise<readonly AgentRunStep[]>;
-    };
-  } = {},
-) {
+export function createConfiguredApp(options: { queue?: JobQueue; runs?: ApiRunRepository } = {}) {
   return createApp({
     logger: { error() {}, info() {} },
     queue: options.queue ?? new FakeJobQueue(),

@@ -2,6 +2,9 @@ import type {
   AgentRun,
   AgentRunCompletion,
   AgentRunFailure,
+  AgentRunHistoryRepository,
+  AgentRunListOptions,
+  AgentRunListPage,
   AgentRunRepository,
   AgentRunStart,
   AgentRunStep,
@@ -19,6 +22,8 @@ interface AgentRunRow {
   status: AgentRun['status'];
   trigger_type: string;
   error_code: string | null;
+  error_message: string | null;
+  email_subject: string | null;
   output_json: unknown | null;
   started_at: Date | string;
   completed_at: Date | string | null;
@@ -37,7 +42,9 @@ interface AgentRunStepRow {
   completed_at: Date | string | null;
 }
 
-export class PostgresAgentRunRepository implements AgentRunRepository, AgentRunStepRepository {
+export class PostgresAgentRunRepository
+  implements AgentRunRepository, AgentRunHistoryRepository, AgentRunStepRepository
+{
   constructor(private readonly database: Pick<DatabaseConnection, 'client'>) {}
 
   async startRun(run: AgentRunStart): Promise<void> {
@@ -93,14 +100,24 @@ export class PostgresAgentRunRepository implements AgentRunRepository, AgentRunS
     const [run] = (await this.database.client`
       SELECT
         runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
-        errors.code AS error_code, runs.output_json, runs.started_at, runs.completed_at
+        errors.code AS error_code, errors.message AS error_message, email.email_subject, runs.output_json,
+        runs.started_at, runs.completed_at
       FROM agent_runs AS runs
       LEFT JOIN LATERAL (
-        SELECT code FROM agent_errors
+        SELECT code, message FROM agent_errors
         WHERE run_id = runs.id
         ORDER BY occurred_at DESC
         LIMIT 1
       ) AS errors ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT output_json->>'emailSubject' AS email_subject
+        FROM agent_run_steps
+        WHERE run_id = runs.id
+          AND step_name = 'FETCH_EMAIL_THREAD'
+          AND status = 'succeeded'
+        ORDER BY sequence
+        LIMIT 1
+      ) AS email ON TRUE
       WHERE runs.id = ${runId}::uuid
     `) as AgentRunRow[];
     return run ? toAgentRun(run) : null;
@@ -110,19 +127,62 @@ export class PostgresAgentRunRepository implements AgentRunRepository, AgentRunS
     const [run] = (await this.database.client`
       SELECT
         runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
-        errors.code AS error_code, runs.output_json, runs.started_at, runs.completed_at
+        errors.code AS error_code, errors.message AS error_message, email.email_subject, runs.output_json,
+        runs.started_at, runs.completed_at
       FROM agent_runs AS runs
       LEFT JOIN LATERAL (
-        SELECT code FROM agent_errors
+        SELECT code, message FROM agent_errors
         WHERE run_id = runs.id
         ORDER BY occurred_at DESC
         LIMIT 1
       ) AS errors ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT output_json->>'emailSubject' AS email_subject
+        FROM agent_run_steps
+        WHERE run_id = runs.id
+          AND step_name = 'FETCH_EMAIL_THREAD'
+          AND status = 'succeeded'
+        ORDER BY sequence
+        LIMIT 1
+      ) AS email ON TRUE
       WHERE runs.job_id = ${jobId}::uuid
       ORDER BY runs.started_at DESC, runs.id DESC
       LIMIT 1
     `) as AgentRunRow[];
     return run ? toAgentRun(run) : null;
+  }
+
+  async listRuns(options: AgentRunListOptions): Promise<AgentRunListPage> {
+    assertListOptions(options);
+    const rows = (await this.database.client`
+      SELECT
+        runs.id, runs.job_id, runs.agent_id, runs.status, runs.trigger_type,
+        errors.code AS error_code, errors.message AS error_message, email.email_subject, runs.output_json,
+        runs.started_at, runs.completed_at
+      FROM agent_runs AS runs
+      LEFT JOIN LATERAL (
+        SELECT code, message FROM agent_errors
+        WHERE run_id = runs.id
+        ORDER BY occurred_at DESC
+        LIMIT 1
+      ) AS errors ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT output_json->>'emailSubject' AS email_subject
+        FROM agent_run_steps
+        WHERE run_id = runs.id
+          AND step_name = 'FETCH_EMAIL_THREAD'
+          AND status = 'succeeded'
+        ORDER BY sequence
+        LIMIT 1
+      ) AS email ON TRUE
+      ORDER BY runs.started_at DESC, runs.id DESC
+      LIMIT ${options.limit + 1}
+      OFFSET ${options.offset}
+    `) as AgentRunRow[];
+    return {
+      hasMore: rows.length > options.limit,
+      runs: rows.slice(0, options.limit).map(toAgentRun),
+    };
   }
 
   async startStep(step: AgentRunStepStart): Promise<void> {
@@ -186,10 +246,24 @@ function toAgentRun(row: AgentRunRow): AgentRun {
     status: row.status,
     triggerType: row.trigger_type,
     errorCode: row.error_code,
+    errorMessage: row.error_message,
+    emailSubject: toSafeEmailSubject(row.email_subject),
     output: row.output_json,
     startedAt: toDate(row.started_at),
     completedAt: row.completed_at ? toDate(row.completed_at) : null,
   };
+}
+
+function toSafeEmailSubject(value: string | null): string | null {
+  if (typeof value !== 'string') return null;
+  const subject = [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || codePoint === 127 ? ' ' : character;
+    })
+    .join('')
+    .trim();
+  return subject ? subject.slice(0, 512) : null;
 }
 
 function toAgentRunStep(row: AgentRunStepRow): AgentRunStep {
@@ -209,6 +283,15 @@ function toAgentRunStep(row: AgentRunStepRow): AgentRunStep {
 
 function toTimestamp(value: Date): string {
   return value.toISOString();
+}
+
+function assertListOptions(options: AgentRunListOptions): void {
+  if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100) {
+    throw new Error('Agent Run list limit must be an integer between 1 and 100');
+  }
+  if (!Number.isSafeInteger(options.offset) || options.offset < 0) {
+    throw new Error('Agent Run list offset must be a non-negative integer');
+  }
 }
 
 function toDate(value: Date | string): Date {

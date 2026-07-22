@@ -53,6 +53,7 @@ export interface GmailReader {
   getMessage(input: {
     readonly googleConnectionId: string;
     readonly gmailMessageId: string;
+    readonly metadataOnly?: boolean;
   }): Promise<EmailMessage>;
   getThread(input: {
     readonly googleConnectionId: string;
@@ -260,19 +261,25 @@ export class HttpGmailReader implements GmailReader {
   async getMessage(input: {
     readonly googleConnectionId: string;
     readonly gmailMessageId: string;
+    readonly metadataOnly?: boolean;
   }): Promise<EmailMessage> {
     requireUuid(input.googleConnectionId);
     requireIdentifier(input.gmailMessageId, 'Gmail message ID');
     return this.#withAccessToken(input.googleConnectionId, async (accessToken) => {
-      const raw = parseGmailResponse(
-        messageSchema,
-        await this.#requestJson(
-          new URL(
-            `${gmailApiBaseUrl}/messages/${encodeURIComponent(input.gmailMessageId)}?format=full`,
-          ),
-          accessToken,
-        ),
+      const url = new URL(
+        `${gmailApiBaseUrl}/messages/${encodeURIComponent(input.gmailMessageId)}`,
       );
+      if (input.metadataOnly) {
+        url.searchParams.set('format', 'metadata');
+        url.searchParams.append('metadataHeaders', 'From');
+        url.searchParams.append('metadataHeaders', 'Reply-To');
+        url.searchParams.append('metadataHeaders', 'Subject');
+        url.searchParams.append('metadataHeaders', 'Message-ID');
+        url.searchParams.append('metadataHeaders', 'References');
+      } else {
+        url.searchParams.set('format', 'full');
+      }
+      const raw = parseGmailResponse(messageSchema, await this.#requestJson(url, accessToken));
       return this.#normalizeMessage(raw, accessToken);
     });
   }
@@ -397,10 +404,21 @@ export class HttpGmailReader implements GmailReader {
       if (!data) {
         return { containsPlain: mimeType === 'text/plain', text: [] };
       }
-      const decoded = decodeBase64Url(
-        data,
-        readMimeCharset(readHeader(part.headers ?? [], 'content-type')),
-      );
+      let decoded: string;
+      try {
+        decoded = decodeBase64Url(
+          data,
+          readMimeCharset(readHeader(part.headers ?? [], 'content-type')),
+        );
+      } catch (error) {
+        // Individual messages in an otherwise usable Gmail thread can contain malformed
+        // MIME body data. Keep their metadata and any other valid parts available to the
+        // Agent instead of failing the entire thread fetch.
+        if (error instanceof AgentDependencyError && error.code === 'INVALID_RESPONSE') {
+          return { containsPlain: mimeType === 'text/plain', text: [] };
+        }
+        throw error;
+      }
       return {
         containsPlain: mimeType === 'text/plain',
         text: [mimeType === 'text/html' ? htmlToText(decoded) : decoded],

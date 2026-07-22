@@ -1,5 +1,7 @@
 # AIAgents 実装計画
 
+> この文書は実装開始時の計画とPR分割を残す履歴資料です。現在のAPI、Schema、状態遷移、制約は[`specification.md`](specification.md)を参照してください。本文中の未実装案や旧名称は、現行仕様を表しません。
+
 ## 1. 文書情報
 
 | 項目 | 内容 |
@@ -970,7 +972,7 @@ POST /agents/job-search-email/runs
 ```text
 FETCH_EMAIL_THREAD
 ANALYZE_EMAIL
-GENERATE_REPLY
+CHECK_REPLY_POLICY
 CHECK_CALENDAR_POLICY
 CREATE_DRAFT
 CREATE_CALENDAR_EVENT

@@ -5,6 +5,7 @@ import {
 } from './client';
 
 export { PostgresAgentRunRepository } from './postgres-agent-run';
+export { PostgresOperationalDataRetentionRepository } from './postgres-data-retention';
 export {
   PostgresGoogleConnectionRepository,
   PostgresOAuthStateRepository,
@@ -13,7 +14,10 @@ export { PostgresJobEmailAnalysisRepository } from './postgres-job-email-analysi
 export { PostgresJobEmailCalendarEventRepository } from './postgres-job-email-calendar';
 export { PostgresJobEmailDraftRepository } from './postgres-job-email-draft';
 export { PostgresJobEmailReviewRequestRepository } from './postgres-job-email-review';
-export { PostgresJobEmailSettingsRepository } from './postgres-job-email-settings';
+export {
+  PostgresJobEmailSettingsRepository,
+  type SaveJobEmailReplySettingsInput,
+} from './postgres-job-email-settings';
 export type { PostgresJobQueueOptions } from './postgres-job-queue';
 export { PostgresJobQueue } from './postgres-job-queue';
 export { PostgresLlmInvocationRepository } from './postgres-llm-invocation';

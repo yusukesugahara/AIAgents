@@ -8,6 +8,8 @@ import {
   OpenAiLlmProvider,
   type OpenAiStructuredClient,
   type OpenAiStructuredResponse,
+  type OpenAiToolTurnRequest,
+  type OpenAiToolTurnResponse,
 } from './index';
 
 const outputSchema = z.object({ category: z.enum(['interview', 'other']) });
@@ -57,6 +59,23 @@ class FakeOpenAiClient implements OpenAiStructuredClient {
   }
 }
 
+class FakeOpenAiToolClient implements OpenAiStructuredClient {
+  readonly requests: OpenAiToolTurnRequest[] = [];
+
+  constructor(private readonly responses: OpenAiToolTurnResponse[]) {}
+
+  async parse(): Promise<OpenAiStructuredResponse> {
+    throw new Error('Structured parse was not expected');
+  }
+
+  async createToolTurn(request: OpenAiToolTurnRequest): Promise<OpenAiToolTurnResponse> {
+    this.requests.push(request);
+    const response = this.responses.shift();
+    if (!response) throw new Error('No fake tool response is queued');
+    return response;
+  }
+}
+
 function createRequest() {
   return {
     model: 'gpt-5.6-terra',
@@ -79,6 +98,386 @@ function parsedResponse(parsed: unknown): OpenAiStructuredResponse {
 }
 
 describe('OpenAiLlmProvider', () => {
+  test('executes and returns custom function outputs until the model produces valid final data', async () => {
+    const repository = new FakeInvocationRepository();
+    const rawFunctionCall = {
+      arguments: '{"location":"Tokyo"}',
+      call_id: 'call-1',
+      name: 'get_weather',
+      type: 'function_call',
+    };
+    const rawReasoning = { id: 'reasoning-1', type: 'reasoning' };
+    const client = new FakeOpenAiToolClient([
+      {
+        output: [
+          { content: [], type: 'reasoning' },
+          {
+            arguments: rawFunctionCall.arguments,
+            callId: rawFunctionCall.call_id,
+            content: [],
+            name: rawFunctionCall.name,
+            type: 'function_call',
+          },
+        ],
+        rawOutput: [rawReasoning, rawFunctionCall],
+        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+      },
+      {
+        output: [
+          {
+            content: [{ parsed: { category: 'interview' }, type: 'output_text' }],
+            type: 'message',
+          },
+        ],
+        rawOutput: [{ id: 'message-1', type: 'message' }],
+        usage: { input_tokens: 20, output_tokens: 4, total_tokens: 24 },
+      },
+    ]);
+    const provider = new OpenAiLlmProvider({ client, invocationRepository: repository });
+    const executions: unknown[] = [];
+
+    const result = await provider.runToolLoop({
+      ...createRequest(),
+      initialToolChoice: 'required',
+      maxToolCalls: 1,
+      maxTurns: 2,
+      requiredToolNames: ['get_weather'],
+      tools: [
+        {
+          description: 'Get weather for a location.',
+          execute: async (arguments_) => {
+            executions.push(arguments_);
+            return { temperatureCelsius: 30 };
+          },
+          maxCalls: 1,
+          name: 'get_weather',
+          parameters: {
+            additionalProperties: false,
+            properties: { location: { type: 'string' } },
+            required: ['location'],
+            type: 'object',
+          },
+          schema: z.object({ location: z.string() }).strict(),
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      data: { category: 'interview' },
+      metadata: {
+        toolCalls: [{ callId: 'call-1', name: 'get_weather', outcome: 'completed' }],
+        usage: { inputTokens: 30, outputTokens: 9, totalTokens: 39 },
+      },
+      status: 'completed',
+    });
+    expect(executions).toEqual([{ location: 'Tokyo' }]);
+    expect(client.requests[1]?.input).toContain(rawReasoning);
+    expect(client.requests[1]?.input).toContain(rawFunctionCall);
+    expect(client.requests[1]?.input).toContainEqual({
+      call_id: 'call-1',
+      output: '{"temperatureCelsius":30}',
+      type: 'function_call_output',
+    });
+    expect(client.requests.map((request) => request.toolChoice)).toEqual(['required', 'auto']);
+    expect(repository.records).toEqual([
+      expect.objectContaining({ outcome: 'completed', reviewReason: null }),
+    ]);
+  });
+
+  test('replays a reasoning-only turn and continues until the required tool and final message arrive', async () => {
+    const reasoningOutput = { encrypted_content: 'opaque', id: 'reasoning-1', type: 'reasoning' };
+    const client = new FakeOpenAiToolClient([
+      {
+        output: [{ content: [], type: 'reasoning' }],
+        rawOutput: [reasoningOutput],
+      },
+      {
+        output: [
+          {
+            arguments: '{"location":"Tokyo"}',
+            callId: 'call-1',
+            content: [],
+            name: 'get_weather',
+            type: 'function_call',
+          },
+        ],
+        rawOutput: [{ id: 'function-1', type: 'function_call' }],
+      },
+      {
+        output: [
+          {
+            content: [{ parsed: { category: 'interview' }, type: 'output_text' }],
+            type: 'message',
+          },
+        ],
+        rawOutput: [{ id: 'message-1', type: 'message' }],
+      },
+    ]);
+    const provider = new OpenAiLlmProvider({
+      client,
+      invocationRepository: new FakeInvocationRepository(),
+    });
+
+    await expect(
+      provider.runToolLoop({
+        ...createRequest(),
+        initialToolChoice: 'required',
+        maxToolCalls: 1,
+        maxTurns: 3,
+        requiredToolNames: ['get_weather'],
+        tools: [
+          {
+            description: 'Get weather for a location.',
+            execute: async () => ({ temperatureCelsius: 30 }),
+            maxCalls: 1,
+            name: 'get_weather',
+            parameters: {
+              additionalProperties: false,
+              properties: { location: { type: 'string' } },
+              required: ['location'],
+              type: 'object',
+            },
+            schema: z.object({ location: z.string() }).strict(),
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ data: { category: 'interview' }, status: 'completed' });
+    expect(client.requests[1]?.input).toContain(reasoningOutput);
+    expect(client.requests.map((request) => request.toolChoice)).toEqual([
+      'required',
+      { name: 'get_weather' },
+      'auto',
+    ]);
+  });
+
+  test('forces each still-missing required tool before accepting the final message', async () => {
+    const client = new FakeOpenAiToolClient([
+      {
+        output: [
+          {
+            arguments: '{}',
+            callId: 'call-thread',
+            content: [],
+            name: 'get_email_thread',
+            type: 'function_call',
+          },
+        ],
+        rawOutput: [],
+      },
+      {
+        output: [
+          {
+            arguments: '{}',
+            callId: 'call-context',
+            content: [],
+            name: 'get_agent_context',
+            type: 'function_call',
+          },
+        ],
+        rawOutput: [],
+      },
+      {
+        output: [
+          {
+            content: [{ parsed: { category: 'other' }, type: 'output_text' }],
+            type: 'message',
+          },
+        ],
+        rawOutput: [],
+      },
+    ]);
+    const provider = new OpenAiLlmProvider({
+      client,
+      invocationRepository: new FakeInvocationRepository(),
+    });
+    const emptySchema = z.object({}).strict();
+    const emptyParameters = {
+      additionalProperties: false,
+      properties: {},
+      required: [],
+      type: 'object',
+    } as const;
+
+    await expect(
+      provider.runToolLoop({
+        ...createRequest(),
+        initialToolChoice: 'required',
+        maxToolCalls: 2,
+        maxTurns: 3,
+        requiredToolNames: ['get_email_thread', 'get_agent_context'],
+        tools: [
+          {
+            description: 'Get an email thread.',
+            execute: async () => ({}),
+            maxCalls: 1,
+            name: 'get_email_thread',
+            parameters: emptyParameters,
+            schema: emptySchema,
+          },
+          {
+            description: 'Get agent context.',
+            execute: async () => ({}),
+            maxCalls: 1,
+            name: 'get_agent_context',
+            parameters: emptyParameters,
+            schema: emptySchema,
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ data: { category: 'other' }, status: 'completed' });
+    expect(client.requests.map((request) => request.toolChoice)).toEqual([
+      'required',
+      { name: 'get_agent_context' },
+      'auto',
+    ]);
+  });
+
+  test('rejects a per-tool call limit violation before executing any call in that turn', async () => {
+    const client = new FakeOpenAiToolClient([
+      {
+        output: [
+          {
+            arguments: '{"location":"Tokyo"}',
+            callId: 'call-1',
+            content: [],
+            name: 'get_weather',
+            type: 'function_call',
+          },
+          {
+            arguments: '{"location":"Osaka"}',
+            callId: 'call-2',
+            content: [],
+            name: 'get_weather',
+            type: 'function_call',
+          },
+        ],
+        rawOutput: [],
+      },
+    ]);
+    const provider = new OpenAiLlmProvider({
+      client,
+      invocationRepository: new FakeInvocationRepository(),
+    });
+    let executions = 0;
+
+    const result = await provider.runToolLoop({
+      ...createRequest(),
+      initialToolChoice: 'required',
+      maxToolCalls: 2,
+      maxTurns: 1,
+      requiredToolNames: ['get_weather'],
+      tools: [
+        {
+          description: 'Get weather for a location.',
+          execute: async () => {
+            executions += 1;
+            return {};
+          },
+          maxCalls: 1,
+          name: 'get_weather',
+          parameters: {
+            additionalProperties: false,
+            properties: { location: { type: 'string' } },
+            required: ['location'],
+            type: 'object',
+          },
+          schema: z.object({ location: z.string() }).strict(),
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({ reason: 'invalid_output', status: 'needs_review' });
+    expect(executions).toBe(0);
+  });
+
+  test('rejects unknown, malformed, missing, and excessive tool calls without executing them', async () => {
+    const invalidResponses: OpenAiToolTurnResponse[] = [
+      {
+        output: [
+          {
+            arguments: '{}',
+            callId: 'call-unknown',
+            content: [],
+            name: 'unknown_tool',
+            type: 'function_call',
+          },
+        ],
+        rawOutput: [],
+      },
+      {
+        output: [
+          {
+            arguments: '{"location":42}',
+            callId: 'call-malformed',
+            content: [],
+            name: 'get_weather',
+            type: 'function_call',
+          },
+        ],
+        rawOutput: [],
+      },
+      {
+        output: [
+          { content: [{ parsed: { category: 'other' }, type: 'output_text' }], type: 'message' },
+        ],
+        rawOutput: [],
+      },
+      {
+        output: [
+          {
+            arguments: '{"location":"Tokyo"}',
+            callId: 'call-1',
+            content: [],
+            name: 'get_weather',
+            type: 'function_call',
+          },
+          {
+            arguments: '{"location":"Osaka"}',
+            callId: 'call-2',
+            content: [],
+            name: 'get_weather',
+            type: 'function_call',
+          },
+        ],
+        rawOutput: [],
+      },
+    ];
+    for (const response of invalidResponses) {
+      let executions = 0;
+      const provider = new OpenAiLlmProvider({
+        client: new FakeOpenAiToolClient([response]),
+        invocationRepository: new FakeInvocationRepository(),
+      });
+      const result = await provider.runToolLoop({
+        ...createRequest(),
+        initialToolChoice: 'required',
+        maxToolCalls: 1,
+        maxTurns: 1,
+        requiredToolNames: ['get_weather'],
+        tools: [
+          {
+            description: 'Get weather for a location.',
+            execute: async () => {
+              executions += 1;
+              return {};
+            },
+            maxCalls: 1,
+            name: 'get_weather',
+            parameters: {
+              additionalProperties: false,
+              properties: { location: { type: 'string' } },
+              required: ['location'],
+              type: 'object',
+            },
+            schema: z.object({ location: z.string() }).strict(),
+          },
+        ],
+      });
+      expect(result).toMatchObject({ reason: 'invalid_output', status: 'needs_review' });
+      expect(executions).toBe(0);
+    }
+  });
+
   test('returns Zod-validated data and records metadata without prompts or output', async () => {
     const repository = new FakeInvocationRepository();
     const client = new FakeOpenAiClient([parsedResponse({ category: 'interview' })]);
@@ -233,6 +632,50 @@ describe('OpenAiLlmProvider', () => {
       code: 'TEMPORARY_UNAVAILABLE',
       retryable: true,
     });
+
+    const toolTimeoutRepository = new FakeInvocationRepository();
+    const toolTimeoutProvider = new OpenAiLlmProvider({
+      client: new FakeOpenAiToolClient([
+        {
+          output: [
+            {
+              arguments: '{}',
+              callId: 'slow-call',
+              content: [],
+              name: 'slow_tool',
+              type: 'function_call',
+            },
+          ],
+          rawOutput: [],
+        },
+      ]),
+      invocationRepository: toolTimeoutRepository,
+      timeoutMs: 1,
+    });
+    await expect(
+      toolTimeoutProvider.runToolLoop({
+        ...createRequest(),
+        maxToolCalls: 1,
+        maxTurns: 1,
+        requiredToolNames: ['slow_tool'],
+        tools: [
+          {
+            description: 'Never completes.',
+            execute: async () => new Promise(() => undefined),
+            maxCalls: 1,
+            name: 'slow_tool',
+            parameters: {
+              additionalProperties: false,
+              properties: {},
+              required: [],
+              type: 'object',
+            },
+            schema: z.object({}).strict(),
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPORARY_UNAVAILABLE', retryable: true });
+    expect(toolTimeoutRepository.records).toEqual([expect.objectContaining({ outcome: 'failed' })]);
 
     const networkProvider = new OpenAiLlmProvider({
       client: new FakeOpenAiClient([new Error('network unavailable')]),

@@ -3,6 +3,8 @@ import type {
   GoogleConnectionCredentialRepository,
   GoogleConnectionRecord,
   GoogleConnectionRepository,
+  GoogleConnectionSummary,
+  GoogleConnectionSummaryRepository,
   GoogleConnectionUpsertInput,
   GoogleOAuthPurpose,
   OAuthStateRecord,
@@ -62,7 +64,10 @@ export class PostgresOAuthStateRepository implements OAuthStateRepository {
 }
 
 export class PostgresGoogleConnectionRepository
-  implements GoogleConnectionRepository, GoogleConnectionCredentialRepository
+  implements
+    GoogleConnectionRepository,
+    GoogleConnectionCredentialRepository,
+    GoogleConnectionSummaryRepository
 {
   constructor(private readonly database: Pick<DatabaseConnection, 'client'>) {}
 
@@ -95,6 +100,29 @@ export class PostgresGoogleConnectionRepository
           grantedScopes: connection.granted_scopes ?? [],
         }
       : null;
+  }
+
+  async listConnections(): Promise<readonly GoogleConnectionSummary[]> {
+    const rows = (await this.database.client`
+      SELECT id, google_email, granted_scopes, status, updated_at
+      FROM connections
+      WHERE type = 'google'
+        AND status IN ('connected', 'reauth_required')
+      ORDER BY updated_at DESC, id DESC
+    `) as Array<{
+      google_email: string;
+      granted_scopes: string[] | null;
+      id: string;
+      status: 'connected' | 'reauth_required';
+      updated_at: Date | string;
+    }>;
+    return rows.map((row) => ({
+      email: row.google_email,
+      grantedScopes: row.granted_scopes ?? [],
+      id: row.id,
+      status: row.status,
+      updatedAt: row.updated_at instanceof Date ? row.updated_at : new Date(row.updated_at),
+    }));
   }
 
   async markReauthRequired(input: {

@@ -158,6 +158,22 @@ describe('Google OAuth', () => {
     );
   });
 
+  test('decrypts with an explicit previous key while encrypting only with the primary key', () => {
+    const previousKey = Buffer.alloc(32, 9).toString('base64');
+    const primaryKey = Buffer.alloc(32, 10).toString('base64');
+    const previousCipher = AesGcmTokenCipher.fromBase64Key(previousKey);
+    const rotatingCipher = AesGcmTokenCipher.fromBase64Keys(primaryKey, [previousKey]);
+
+    expect(rotatingCipher.decrypt(previousCipher.encrypt('old-refresh-token'))).toBe(
+      'old-refresh-token',
+    );
+    const newlyEncrypted = rotatingCipher.encrypt('new-refresh-token');
+    expect(AesGcmTokenCipher.fromBase64Key(primaryKey).decrypt(newlyEncrypted)).toBe(
+      'new-refresh-token',
+    );
+    expect(() => previousCipher.decrypt(newlyEncrypted)).toThrow('invalid or expired');
+  });
+
   test('creates a PKCE authorization request and saves a hashed state', async () => {
     const { service, states } = createService();
     const authorization = await service.begin();
@@ -198,6 +214,26 @@ describe('Google OAuth', () => {
         state,
       }),
     ).rejects.toMatchObject({ code: 'OAUTH_STATE_INVALID' });
+  });
+
+  test('accepts a Gmail grant when Google omits OpenID scopes from its token response', async () => {
+    const { connections, provider, service } = createService();
+    provider.tokens = {
+      ...provider.tokens,
+      grantedScopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+    };
+    const authorization = await service.begin();
+    const state = new URL(authorization.authorizationUrl).searchParams.get('state') ?? '';
+
+    await service.complete({
+      browserNonce: authorization.browserNonce,
+      code: 'authorization-code',
+      state,
+    });
+
+    expect(connections.saved[0]?.grantedScopes).toEqual([
+      'https://www.googleapis.com/auth/gmail.readonly',
+    ]);
   });
 
   test('requests and records the compose scope for a Draft authorization', async () => {
@@ -378,6 +414,7 @@ describe('Google OAuth', () => {
       clientId: 'client-id',
       clientSecret: 'client-secret',
       tokenEncryptionKey: encryptionKey,
+      tokenEncryptionPreviousKeys: [],
     });
   });
 
@@ -396,6 +433,32 @@ describe('Google OAuth', () => {
     await expect(
       provider.exchangeAuthorizationCode({ code: 'secret-code', codeVerifier: 'verifier' }),
     ).rejects.toMatchObject({ code: 'OAUTH_PROVIDER_FAILURE' });
+  });
+
+  test('records only safe diagnostics when Google rejects a token exchange', async () => {
+    const provider = new HttpGoogleOAuthProvider(
+      {
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        redirectUri: 'http://localhost:4000/auth/google/callback',
+      },
+      (async () =>
+        new Response(
+          JSON.stringify({ error: 'invalid_client', error_description: 'secret value' }),
+          {
+            status: 401,
+          },
+        )) as unknown as typeof fetch,
+    );
+
+    await expect(
+      provider.exchangeAuthorizationCode({ code: 'secret-code', codeVerifier: 'verifier' }),
+    ).rejects.toMatchObject({
+      code: 'OAUTH_PROVIDER_FAILURE',
+      failureReason: 'token_exchange',
+      providerError: 'invalid_client',
+      providerStatus: 401,
+    });
   });
 
   test('enforces the timeout while reading a Google response body', async () => {

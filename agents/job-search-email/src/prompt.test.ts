@@ -6,10 +6,17 @@ import {
   jobEmailAnalysisSystemPrompt,
   maximumPromptPayloadBytes,
 } from './prompt';
-import { jobEmailAnalysisSchema } from './schemas';
+import { jobEmailAnalysisSchema, jobEmailAnalysisStructuredOutputSchema } from './schemas';
 import { analysis, message } from './test-support';
 
 describe('Job Email analysis schema and prompt boundary', () => {
+  test('uses a transport schema compatible with Structured Outputs and validates final data strictly', () => {
+    const candidate = analysis({ companyName: 'a'.repeat(501) });
+
+    expect(jobEmailAnalysisStructuredOutputSchema.safeParse(candidate).success).toBe(true);
+    expect(jobEmailAnalysisSchema.safeParse(candidate).success).toBe(false);
+  });
+
   test('accepts every category and rejects inconsistent cross-field values', () => {
     for (const category of jobEmailAnalysisSchema.shape.category.options) {
       const value =
@@ -116,6 +123,13 @@ describe('Job Email analysis schema and prompt boundary', () => {
     ).toBeGreaterThan(0);
     expect(promptMessages.some((item) => item.bodyTruncated)).toBe(true);
     expect(jobEmailAnalysisSystemPrompt).toContain('untrusted email data');
+  });
+
+  test('prioritizes recruiting and interview signals so scheduling messages are not skipped', () => {
+    expect(jobEmailAnalysisSystemPrompt).toContain('採用, 求人, 面接, 面談, 選考, 日程調整');
+    expect(jobEmailAnalysisSystemPrompt).toContain('scheduling_request');
+    expect(jobEmailAnalysisSystemPrompt).toContain('A scheduling_request is always reply-required');
+    expect(jobEmailAnalysisSystemPrompt).toContain('prefer job-related over');
   });
 
   test('keeps reply prompts within the payload limit after adding verified metadata', () => {

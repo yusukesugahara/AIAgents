@@ -7,6 +7,7 @@
 ```text
 docs/
 ├── README.md
+├── submission.md
 ├── architecture/
 │   ├── repository-structure.md
 │   ├── technical-stack.md
@@ -16,18 +17,21 @@ docs/
 │   │   └── specification-template.md
 │   └── job-search-email-agent/
 │       ├── specification.md
-│       └── implementation-plan.md
+│       ├── implementation-plan.md
+│       └── operation-guide.md
 └── decisions/
     ├── 0001-modular-monolith.md
     ├── 0002-hono-and-bun.md
     └── 0003-drizzle-and-postgresql.md
 ```
 
+提出時に確認する要件とデモの進め方は [submission.md](submission.md) を参照してください。
+
 ## 共通アーキテクチャ
 
 | 文書 | 内容 |
 |---|---|
-| `architecture/repository-structure.md` | `apps`、`agents`、`packages`の構成と責務 |
+| `architecture/repository-structure.md` | `apps`、`agents`、`packages`の推奨構成と責務 |
 | `architecture/technical-stack.md` | Hono、Bun、PostgreSQL、Drizzle等の利用範囲 |
 | `architecture/dependency-rules.md` | package間の依存方向と禁止import |
 
@@ -57,7 +61,7 @@ Runtime / Package manager / Test: Bun
 API: Hono
 Worker: Bunプロセス
 Validation: Zod
-Database: PostgreSQL 17
+Database: PostgreSQL 18.4
 ORM: Drizzle ORM
 Driver: postgres.js
 Local runtime: Docker Compose
@@ -67,7 +71,9 @@ Local runtime: Docker Compose
 
 | Agent ID | 名称 | 概要 | 状態 |
 |---|---|---|---|
-| `job-search-email` | 就職活動メールエージェント | Gmailの就活関連メールを解析し、返信下書きとWeb面談予定を作成する | 仕様策定中 |
+| `job-search-email` | 就職活動メールエージェント | Gmailの就活関連メールを解析し、返信下書きとWeb面談予定を作成する | 実装済み |
+
+`job-search-email`のCalendar作成処理は実装済みですが、現行セットアップ画面から作成設定を有効化する機能は未実装です。現在の動作と制約は[`specification.md`](agents/job-search-email-agent/specification.md)を参照してください。
 
 ## 新規エージェント追加手順
 

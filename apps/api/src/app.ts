@@ -2,11 +2,13 @@ import { AgentCoreError, IdempotencyConflictError } from '@ai-agents/agent-core'
 import { GoogleOAuthError } from '@ai-agents/google-oauth';
 import { Hono } from 'hono';
 import { type ApiAppOptions, type ApiEnvironment, ApiError, type ApiLogger } from './api-types';
-import { errorResponse, hasValidBearerToken, isPublicPath, oauthErrorMessage } from './http';
+import { errorResponse, hasValidAccessToken, isPublicPath, oauthErrorMessage } from './http';
 import { registerAgentRoutes } from './routes/agents';
 import { registerHealthRoutes } from './routes/health';
 import { registerOAuthRoutes } from './routes/oauth';
+import { registerRunHistoryRoutes } from './routes/run-history';
 import { registerRunRoutes } from './routes/runs';
+import { registerSetupRoutes } from './routes/setup';
 
 export type { ApiAppOptions, ApiLogger } from './api-types';
 
@@ -23,8 +25,9 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
       if (
         options.accessToken &&
         !isPublicPath(new URL(context.req.url).pathname) &&
-        !hasValidBearerToken(context.req.header('Authorization'), options.accessToken)
+        !hasValidAccessToken(context.req.header('Authorization'), options.accessToken)
       ) {
+        context.header('WWW-Authenticate', 'Basic realm="AIAgents", charset="UTF-8"');
         return errorResponse(context, 'UNAUTHORIZED', 401, 'Authentication is required');
       }
       await next();
@@ -43,6 +46,8 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
   registerOAuthRoutes(app, options, logger);
   registerAgentRoutes(app, options, logger);
   registerRunRoutes(app, options);
+  registerRunHistoryRoutes(app, options);
+  registerSetupRoutes(app, options, logger);
 
   app.notFound((context) => errorResponse(context, 'NOT_FOUND', 404, 'Route was not found'));
   app.onError((error, context) => {
@@ -67,6 +72,9 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
         code: error.code,
         event: 'oauth.google.failed',
         requestId: context.get('requestId'),
+        ...(error.failureReason ? { failureReason: error.failureReason } : {}),
+        ...(error.providerError ? { providerError: error.providerError } : {}),
+        ...(error.providerStatus ? { providerStatus: error.providerStatus } : {}),
       });
       return errorResponse(context, error.code, status, oauthErrorMessage(error.code));
     }

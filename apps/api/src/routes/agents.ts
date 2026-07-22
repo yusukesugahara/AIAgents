@@ -1,6 +1,7 @@
-import { AgentCoreError, type AgentRegistry, type JobQueue } from '@ai-agents/agent-core';
+import { AgentCoreError, type AgentRegistry } from '@ai-agents/agent-core';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
+import { enqueueManualAgentRun } from '../agent-run-service';
 import { type ApiAppOptions, type ApiEnvironment, ApiError, type ApiLogger } from '../api-types';
 
 const runRequestSchema = z
@@ -25,27 +26,15 @@ export function registerAgentRoutes(
     return context.json({ agent: getAgent(registry, context.req.param('agentId')).manifest });
   });
   app.post('/agents/:agentId/runs', async (context) => {
-    const registry = requireRegistry(options);
-    const queue = requireQueue(options);
-    const agent = getAgent(registry, context.req.param('agentId'));
-    if (!agent.manifest.triggers.includes('manual')) {
-      throw new ApiError(
-        'AGENT_TRIGGER_UNSUPPORTED',
-        400,
-        `Agent "${agent.manifest.id}" does not support manual runs`,
-      );
-    }
     const payload = await parseRunRequest(context);
-    const inputResult = agent.inputSchema.safeParse(payload.input);
-    if (!inputResult.success) throw new ApiError('BAD_REQUEST', 400, inputResult.error.message);
-    const job = await queue.enqueue({
-      agentId: agent.manifest.id,
-      input: inputResult.data,
-      triggerType: 'manual',
+    const agentId = context.req.param('agentId');
+    const job = await enqueueManualAgentRun(options, {
+      agentId,
+      value: payload.input,
       ...(payload.idempotencyKey ? { idempotencyKey: payload.idempotencyKey } : {}),
     });
     logger.info({
-      agentId: agent.manifest.id,
+      agentId,
       event: 'api.job.enqueued',
       jobId: job.id,
       requestId: context.get('requestId'),
@@ -59,11 +48,6 @@ function requireRegistry(options: ApiAppOptions): AgentRegistry {
     throw new ApiError('INTERNAL_ERROR', 500, 'Agent Registry is not configured');
   }
   return options.registry;
-}
-
-function requireQueue(options: ApiAppOptions): JobQueue {
-  if (!options.queue) throw new ApiError('INTERNAL_ERROR', 500, 'Job Queue is not configured');
-  return options.queue;
 }
 
 function getAgent(registry: AgentRegistry, agentId: string) {

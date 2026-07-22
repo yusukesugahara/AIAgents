@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { IdempotencyConflictError, RetryableJobError } from '@ai-agents/agent-core';
+import {
+  AgentDependencyError,
+  IdempotencyConflictError,
+  RetryableJobError,
+} from '@ai-agents/agent-core';
 import { AesGcmTokenCipher } from '@ai-agents/google-oauth';
 import {
   jobEmailAnalysisPromptVersion,
@@ -239,6 +243,17 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           status: 'connected',
         });
         expect(cipher.decrypt(stored.encrypted_refresh_token)).toBe('second-token');
+        expect(await connections.listConnections()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              email,
+              grantedScopes: ['openid'],
+              id: stored.id,
+              status: 'connected',
+              updatedAt: expect.any(Date),
+            }),
+          ]),
+        );
 
         const freshToken = cipher.encrypt('concurrent-fresh-token');
         await Promise.all([
@@ -305,6 +320,11 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           SELECT status FROM connections WHERE id = ${stored.id}::uuid
         `) as Array<{ status: string }>;
         expect(reauth?.status).toBe('reauth_required');
+        expect(await connections.listConnections()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: stored.id, status: 'reauth_required' }),
+          ]),
+        );
       } finally {
         await connection.client`
           DELETE FROM oauth_authorization_states
@@ -439,6 +459,79 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
       }
     });
 
+    test('requeues only matching terminal transient failures on an idempotent poll', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection, { maxAttempts: 1 });
+      const agentId = `poll-agent-${crypto.randomUUID()}`;
+      const transientKey = `poll-transient-${crypto.randomUUID()}`;
+      const permanentKey = `poll-permanent-${crypto.randomUUID()}`;
+      const request = (idempotencyKey: string, retryFailed = false) => ({
+        agentId,
+        idempotencyKey,
+        input: { source: 'integration' },
+        ...(retryFailed ? { retryFailed: true } : {}),
+        triggerType: 'schedule',
+      });
+
+      try {
+        const transientJob = await queue.enqueue(request(transientKey));
+        const claimedTransient = await queue.claimNext({ agentId, workerId: 'worker-transient' });
+        expect(claimedTransient?.id).toBe(transientJob.id);
+        await queue.fail({
+          error: new AgentDependencyError(
+            'TEMPORARY_UNAVAILABLE',
+            true,
+            'temporary integration failure',
+          ),
+          jobId: transientJob.id,
+          retryable: true,
+          workerId: 'worker-transient',
+        });
+        expect(await queue.enqueue(request(transientKey))).toMatchObject({ status: 'failed' });
+        expect(await queue.enqueue(request(transientKey, true))).toMatchObject({
+          attempts: 0,
+          id: transientJob.id,
+          lastError: null,
+          lastErrorCode: null,
+          status: 'queued',
+        });
+
+        const reclaimedTransient = await queue.claimNext({
+          agentId,
+          workerId: 'worker-transient-retry',
+        });
+        expect(reclaimedTransient?.id).toBe(transientJob.id);
+        await queue.complete({
+          jobId: transientJob.id,
+          workerId: 'worker-transient-retry',
+        });
+
+        const permanentJob = await queue.enqueue(request(permanentKey));
+        await queue.claimNext({ agentId, workerId: 'worker-permanent' });
+        await queue.fail({
+          error: new AgentDependencyError(
+            'INVALID_REQUEST',
+            false,
+            'permanent integration failure',
+          ),
+          jobId: permanentJob.id,
+          retryable: false,
+          workerId: 'worker-permanent',
+        });
+        expect(await queue.enqueue(request(permanentKey, true))).toMatchObject({
+          attempts: 1,
+          id: permanentJob.id,
+          lastErrorCode: 'INVALID_REQUEST',
+          status: 'failed',
+        });
+      } finally {
+        await connection.client`
+          DELETE FROM agent_jobs WHERE idempotency_key IN (${transientKey}, ${permanentKey})
+        `;
+        await connection.close();
+      }
+    });
+
     test('honors delayed availability', async () => {
       const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
       const queue = new PostgresJobQueue(connection);
@@ -502,9 +595,9 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
       }
     });
 
-    test('uses 1s and 2s retry waits and fails after the third attempt', async () => {
+    test('uses configured retry waits and fails after the third attempt', async () => {
       const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
-      const queue = new PostgresJobQueue(connection);
+      const queue = new PostgresJobQueue(connection, { retryDelaysMs: [1_000, 2_000] });
       const agentId = `backoff-agent-${crypto.randomUUID()}`;
       const idempotencyKey = `backoff-${crypto.randomUUID()}`;
 
@@ -737,6 +830,20 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           message: 'provider unavailable',
           job_id: job.id,
         });
+        expect(
+          (await repository.listRuns({ limit: 100, offset: 0 })).runs.filter(
+            (run) => run.jobId === job.id,
+          ),
+        ).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: completedRunId, status: 'completed' }),
+            expect.objectContaining({
+              errorCode: 'AGENT_EXECUTION_FAILED',
+              id: failedRunId,
+              status: 'failed',
+            }),
+          ]),
+        );
 
         await expect(
           repository.completeRun({
@@ -1093,6 +1200,22 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
           emailSignature: '署名',
           googleEmail: email,
           userName: '候補者',
+        });
+        expect(
+          await settings.saveReplySettings({
+            createDrafts: true,
+            draftConfidenceThreshold: 0.95,
+            emailSignature: '更新後の署名',
+            googleConnectionId: connectionId,
+            userName: '更新後の候補者',
+          }),
+        ).toBe(true);
+        expect(await settings.getReplySettings(connectionId)).toEqual({
+          createDrafts: true,
+          draftConfidenceThreshold: 0.95,
+          emailSignature: '更新後の署名',
+          googleEmail: email,
+          userName: '更新後の候補者',
         });
 
         const job = await queue.enqueue({

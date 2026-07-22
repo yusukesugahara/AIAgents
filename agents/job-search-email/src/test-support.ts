@@ -67,7 +67,7 @@ export function analysis(overrides: Partial<JobEmailAnalysis> = {}): JobEmailAna
 export function message(
   id = 'message-1',
   threadId = 'thread-1',
-  bodyText = '選考結果をご案内します',
+  bodyText = 'Example株式会社 採用担当者より、選考結果をご案内します。面談は2026年7月21日 10:00〜11:00、URL: https://meet.example.com/interview',
   sentAt = new Date('2026-07-19T01:00:00.000Z'),
 ): EmailMessage {
   return {
@@ -241,6 +241,7 @@ export class FakeGoogleCalendar implements GoogleCalendarClient {
 
 export class FakeDraftRepository implements JobEmailDraftRepository {
   completed: Parameters<JobEmailDraftRepository['complete']>[0][] = [];
+  reopened: Parameters<JobEmailDraftRepository['reopen']>[0][] = [];
   reservations: Parameters<JobEmailDraftRepository['reserve']>[0][] = [];
   reservation: Awaited<ReturnType<JobEmailDraftRepository['reserve']>> = {
     draftId: null,
@@ -256,6 +257,10 @@ export class FakeDraftRepository implements JobEmailDraftRepository {
   ): Promise<Awaited<ReturnType<JobEmailDraftRepository['reserve']>>> {
     this.reservations.push(input);
     return this.reservation;
+  }
+
+  async reopen(input: Parameters<JobEmailDraftRepository['reopen']>[0]): Promise<void> {
+    this.reopened.push(input);
   }
 }
 

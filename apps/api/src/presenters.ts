@@ -38,6 +38,43 @@ export function toRunResponse(run: AgentRun, steps: readonly AgentRunStep[] = []
   };
 }
 
+export function toRunHistoryResponse(run: AgentRun, steps: readonly AgentRunStep[] = []) {
+  return {
+    ...toRunResponse(run, steps),
+    emailSubject: toSafeEmailSubject(run.emailSubject),
+    errorDetail: toSafeRunErrorDetail(run.errorCode, run.errorMessage),
+  };
+}
+
+function toSafeRunErrorDetail(errorCode: string | null, errorMessage: string | null | undefined) {
+  if (typeof errorMessage !== 'string') return null;
+  const invalidResponseDetails = new Set([
+    'Gmail returned an invalid response',
+    'Gmail returned inconsistent message and thread data',
+    'Gmail message is missing required content',
+    'Gmail message has an invalid date',
+    'Gmail message body is invalid',
+  ]);
+  const invalidRequestDetails = new Set([
+    'OpenAI rejected the request',
+    'OpenAI structured output schema is invalid',
+    'LLM model must not be empty',
+    'LLM promptVersion must not be empty',
+    'LLM schemaName must not be empty',
+    'LLM schemaVersion must not be empty',
+    'LLM systemPrompt must not be empty',
+    'LLM userInput must not be empty',
+    'LLM schema is invalid',
+  ]);
+  if (errorCode === 'INVALID_RESPONSE' && invalidResponseDetails.has(errorMessage)) {
+    return errorMessage;
+  }
+  if (errorCode === 'INVALID_REQUEST' && invalidRequestDetails.has(errorMessage)) {
+    return errorMessage;
+  }
+  return null;
+}
+
 function toJobSearchEmailOutput(run: AgentRun): {
   readonly calendarEventId: string | null;
   readonly draftId: string | null;
@@ -87,11 +124,14 @@ function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
     'calendarEventId',
     'category',
     'draftId',
+    'emailSubject',
     'gmailMessageId',
     'gmailThreadId',
+    'notApplicableReason',
     'outcome',
     'result',
     'reviewReason',
+    'writeStatus',
   ] as const;
   const safeBooleanKeys = ['applicable', 'isJobRelated', 'retryable'] as const;
   const safeOutput: Record<string, unknown> = {};
@@ -103,14 +143,41 @@ function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
     const field = output[key];
     if (typeof field === 'boolean') safeOutput[key] = field;
   }
+  for (const key of ['messageCount', 'toolCallCount'] as const) {
+    const field = output[key];
+    if (typeof field === 'number' && Number.isSafeInteger(field) && field >= 0) {
+      safeOutput[key] = field;
+    }
+  }
+  const allowedToolNames = new Set([
+    'create_reply_draft',
+    'create_scheduling_placeholder_draft',
+    'get_agent_context',
+    'get_email_thread',
+  ]);
   if (
-    typeof output.messageCount === 'number' &&
-    Number.isSafeInteger(output.messageCount) &&
-    output.messageCount >= 0
+    Array.isArray(output.toolNames) &&
+    output.toolNames.length <= 8 &&
+    output.toolNames.every((name) => typeof name === 'string' && allowedToolNames.has(name))
   ) {
-    safeOutput.messageCount = output.messageCount;
+    safeOutput.toolNames = output.toolNames;
   }
   return safeOutput;
+}
+
+function toSafeEmailSubject(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const subject = replaceControlCharacters(value).trim();
+  return subject && subject.length <= 512 ? subject : null;
+}
+
+function replaceControlCharacters(value: string): string {
+  return [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || codePoint === 127 ? ' ' : character;
+    })
+    .join('');
 }
 
 function toIsoString(value: Date | string): string {

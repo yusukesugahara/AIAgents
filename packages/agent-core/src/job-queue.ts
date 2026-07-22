@@ -28,6 +28,8 @@ export interface EnqueueJobInput {
   readonly input: unknown;
   readonly idempotencyKey?: string;
   readonly availableAt?: Date;
+  /** Requeues a matching terminal transient failure while preserving its idempotency key. */
+  readonly retryFailed?: boolean;
   readonly triggerType: string;
 }
 

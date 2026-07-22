@@ -1,13 +1,13 @@
 import type { EmailMessage, EmailThread } from '@ai-agents/connector-google';
 import type { JobEmailAnalysis } from './schemas';
 
-export const jobEmailAnalysisPromptVersion = '2026-07-20.v2';
+export const jobEmailAnalysisPromptVersion = '2026-07-22.v4';
 export const jobEmailAnalysisSchemaName = 'job_email_analysis';
 export const jobEmailAnalysisSchemaVersion = '1';
 export const jobEmailDefaultTimezone = 'Asia/Tokyo';
 
 const maximumMessages = 20;
-export const maximumPromptPayloadBytes = 512 * 1024;
+export const maximumPromptPayloadBytes = 128 * 1024;
 
 export const jobEmailAnalysisSystemPrompt = `You classify and extract facts from job-search email threads.
 
@@ -25,12 +25,26 @@ Extraction rules:
 - Resolve relative dates only against the sentAt value of the message containing that date.
 - If an end time is absent, return null rather than estimating a duration.
 - Evidence must be short quotations or faithful excerpts, at most 5 items and 240 characters each.
+- Classify a thread as job-related when it concerns an application, recruiter, employer, hiring,
+  interview, selection, offer, employment conditions, or a request to schedule one of these.
+  This includes Japanese signals such as 応募, 採用, 求人, 面接, 面談, 選考, 日程調整,
+  候補日時, 内定, and 入社, as well as their English equivalents.
+- When the supplied thread contains any job-search signal and asks the recipient to reply, choose
+  a date, provide availability, attend an interview, or submit information, set isJobRelated true.
+  Missing company details or candidate dates must not make such a thread not_job_related; use
+  scheduling_request and record the missing information instead.
+- A scheduling_request is always reply-required. Set needsReply true and replyIntent to
+  submit_information. If an employer proposes dates but the recipient's selected date is not in
+  the thread, include 希望日時 in missingRequiredInformation so an editable Draft can be created.
+- In an ambiguous thread that contains a recruiting or interview signal, prefer job-related over
+  not_job_related. Use not_job_related only when the thread is clearly unrelated to job search,
+  such as receipts, security notices, newsletters, personal mail, or marketing without a hiring context.
 - A non-job-related result must use category not_job_related, needsReply false, replyIntent none,
   null company/contact/meeting fields, an empty missingRequiredInformation array, and urlType none.`;
 
-export const jobEmailReplyPromptVersion = '2026-07-20.v1';
-export const jobEmailReplySchemaName = 'job_email_reply';
-export const jobEmailReplySchemaVersion = '1';
+export const jobEmailDraftToolPromptVersion = '2026-07-22.v1';
+export const jobEmailDraftToolSchemaName = 'job_email_draft_tool_completion';
+export const jobEmailDraftToolSchemaVersion = '1';
 export const jobEmailDraftPolicyVersion = '2026-07-20.v1';
 export const jobEmailCalendarPolicyVersion = '2026-07-20.v1';
 export const jobEmailReplySystemPrompt = `Write a concise, polite Japanese email reply.

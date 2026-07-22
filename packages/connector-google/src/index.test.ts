@@ -123,6 +123,51 @@ describe('HttpGmailReader', () => {
     });
   });
 
+  test('requests metadata only without parsing a message body', async () => {
+    let requestUrl: URL | undefined;
+    const reader = new HttpGmailReader({
+      accessTokens: new FakeAccessTokens(),
+      fetchImplementation: async (input) => {
+        requestUrl = new URL(String(input));
+        return response({
+          id: 'message-1',
+          internalDate: '1784505600000',
+          payload: {
+            headers: [
+              { name: 'From', value: 'Recruiter <recruiter@example.com>' },
+              { name: 'Reply-To', value: 'reply@example.com' },
+              { name: 'Subject', value: 'Interview' },
+              { name: 'Message-ID', value: '<message-1@example.com>' },
+              { name: 'References', value: '<previous@example.com>' },
+            ],
+          },
+          threadId: 'thread-1',
+        });
+      },
+    });
+
+    const message = await reader.getMessage({
+      gmailMessageId: 'message-1',
+      googleConnectionId: connectionId,
+      metadataOnly: true,
+    });
+
+    expect(requestUrl?.searchParams.get('format')).toBe('metadata');
+    expect(requestUrl?.searchParams.getAll('metadataHeaders')).toEqual([
+      'From',
+      'Reply-To',
+      'Subject',
+      'Message-ID',
+      'References',
+    ]);
+    expect(message.bodyText).toBe('');
+    expect(message.from).toBe('Recruiter <recruiter@example.com>');
+    expect(message.replyTo).toBe('reply@example.com');
+    expect(message.subject).toBe('Interview');
+    expect(message.messageId).toBe('<message-1@example.com>');
+    expect(message.references).toEqual(['<previous@example.com>']);
+  });
+
   test('recursively selects plain text inside nested multipart content', async () => {
     const reader = new HttpGmailReader({
       accessTokens: new FakeAccessTokens(),
@@ -384,19 +429,26 @@ describe('HttpGmailReader', () => {
     ).rejects.toMatchObject({ code: 'INVALID_RESPONSE', retryable: false });
   });
 
-  test('rejects malformed Base64URL message bodies and invalid request limits', async () => {
+  test('skips malformed message body parts and validates request limits', async () => {
     const reader = new HttpGmailReader({
       accessTokens: new FakeAccessTokens(),
       fetchImplementation: async () =>
         response(
           emailMessage({
-            payload: { body: { data: '@@@' }, headers: [], mimeType: 'text/plain' },
+            payload: {
+              headers: [],
+              mimeType: 'multipart/mixed',
+              parts: [
+                { body: { data: '@@@' }, mimeType: 'text/plain' },
+                { body: { data: base64Url('usable body') }, mimeType: 'text/plain' },
+              ],
+            },
           }),
         ),
     });
     await expect(
       reader.getMessage({ googleConnectionId: connectionId, gmailMessageId: 'message-1' }),
-    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE', retryable: false });
+    ).resolves.toMatchObject({ bodyText: 'usable body' });
     await expect(
       reader.listMessages({ googleConnectionId: connectionId, maxResults: 101 }),
     ).rejects.toMatchObject({

@@ -14,26 +14,40 @@ export function errorResponse(
   return context.json({ error: { code, message, requestId } }, status);
 }
 
-export function hasValidBearerToken(
+export function hasValidAccessToken(
   authorization: string | undefined,
   expectedToken: string,
 ): boolean {
-  const token = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
+  const token = readAuthorizationToken(authorization);
   const encoder = new TextEncoder();
   const actual = encoder.encode(token);
   const expected = encoder.encode(expectedToken);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+function readAuthorizationToken(authorization: string | undefined): string {
+  if (authorization?.startsWith('Bearer ')) {
+    return authorization.slice('Bearer '.length);
+  }
+  if (!authorization?.startsWith('Basic ')) return '';
+
+  try {
+    const credentials = Buffer.from(authorization.slice('Basic '.length), 'base64').toString(
+      'utf8',
+    );
+    const separator = credentials.indexOf(':');
+    if (separator < 0 || credentials.slice(0, separator) !== 'admin') return '';
+    return credentials.slice(separator + 1);
+  } catch {
+    return '';
+  }
+}
+
 export function isPublicPath(pathname: string): boolean {
   return (
     pathname === '/health/live' ||
     pathname === '/health/ready' ||
-    pathname === '/auth/google' ||
-    pathname === '/auth/google/compose' ||
-    pathname === '/auth/google/calendar' ||
-    pathname === '/auth/google/callback' ||
-    pathname === '/auth/google/complete'
+    pathname === '/auth/google/callback'
   );
 }
 

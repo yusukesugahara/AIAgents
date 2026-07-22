@@ -19,6 +19,14 @@ const settingsSchema = z
   })
   .strict();
 
+export interface SaveJobEmailReplySettingsInput {
+  readonly createDrafts: boolean;
+  readonly draftConfidenceThreshold: number;
+  readonly emailSignature: string;
+  readonly googleConnectionId: string;
+  readonly userName: string;
+}
+
 export class PostgresJobEmailSettingsRepository implements JobEmailSettingsRepository {
   constructor(private readonly database: Pick<DatabaseConnection, 'client'>) {}
 
@@ -42,6 +50,36 @@ export class PostgresJobEmailSettingsRepository implements JobEmailSettingsRepos
       createCalendarEvents: settings.enabled && settings.data.createCalendarEvents,
       timezone: settings.data.timezone,
     };
+  }
+
+  async saveReplySettings(input: SaveJobEmailReplySettingsInput): Promise<boolean> {
+    const replySettings = {
+      createDrafts: input.createDrafts,
+      draftConfidenceThreshold: input.draftConfidenceThreshold,
+      emailSignature: input.emailSignature,
+      replyStyle: 'polite_concise' as const,
+      userName: input.userName,
+    };
+    const initialSettings = settingsSchema.parse({
+      ...replySettings,
+      createCalendarEvents: false,
+    });
+    const [saved] = (await this.database.client`
+      INSERT INTO agent_settings (user_id, agent_id, enabled, settings_json, updated_at)
+      SELECT connections.user_id, 'job-search-email', true, ${JSON.stringify(initialSettings)}::jsonb, NOW()
+      FROM connections
+      WHERE connections.id = ${input.googleConnectionId}::uuid
+        AND connections.type = 'google'
+        AND connections.status = 'connected'
+      ON CONFLICT (user_id, agent_id) DO UPDATE
+      SET enabled = true,
+          settings_json = '{"createCalendarEvents":false}'::jsonb
+            || agent_settings.settings_json
+            || ${JSON.stringify(replySettings)}::jsonb,
+          updated_at = NOW()
+      RETURNING id
+    `) as Array<{ id: string }>;
+    return saved !== undefined;
   }
 
   async #getSettings(googleConnectionId: string): Promise<{

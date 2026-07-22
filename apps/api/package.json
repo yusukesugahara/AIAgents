@@ -10,8 +10,10 @@
     "@ai-agents/agent-core": "workspace:*",
     "@ai-agents/agent-composition": "workspace:*",
     "@ai-agents/config": "workspace:*",
+    "@ai-agents/connector-google": "workspace:*",
     "@ai-agents/database": "workspace:*",
     "@ai-agents/google-oauth": "workspace:*",
+    "@ai-agents/job-search-email": "workspace:*",
     "hono": "^4.11.10",
     "zod": "^4.3.6"
   }

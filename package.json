@@ -19,6 +19,8 @@
     "db:test-migrate": "bun --no-env-file run --filter @ai-agents/database db:test-migrate",
     "test:integration:database": "INTEGRATION_TESTS=1 DATABASE_URL=postgres://postgres:postgres@localhost:5432/ai_agents bun --no-env-file test packages/database/src/integration.test.ts apps/worker/src/job-email.integration.test.ts",
     "test:integration:docker": "DOCKER_INTEGRATION_TESTS=1 bun --no-env-file test packages/database/src/compose.integration.test.ts",
+    "compose:dev": "docker compose --env-file ./.env -f compose.yaml -f compose.dev.yaml up --build",
+    "compose:dev:down": "docker compose --env-file ./.env -f compose.yaml -f compose.dev.yaml down",
     "compose:up": "docker compose up --build",
     "compose:down": "docker compose down"
   },

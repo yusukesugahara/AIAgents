@@ -35,13 +35,19 @@ describe('Job Search Email analysis flow', () => {
       { googleConnectionId: connectionId, gmailThreadId: 'thread-1' },
     ]);
     expect(dependencies.llm.requests[0]).toMatchObject({
+      initialToolChoice: 'required',
+      maxToolCalls: 2,
       model: 'test-model',
       promptVersion: jobEmailAnalysisPromptVersion,
       runId: context().runId,
       schemaName: jobEmailAnalysisSchemaName,
       schemaVersion: jobEmailAnalysisSchemaVersion,
-      systemPrompt: jobEmailAnalysisSystemPrompt,
     });
+    expect(dependencies.llm.requests[0]?.systemPrompt).toContain(jobEmailAnalysisSystemPrompt);
+    expect(dependencies.llm.toolExecutions.map((execution) => execution.name)).toEqual([
+      'get_email_thread',
+      'get_agent_context',
+    ]);
     expect(dependencies.analyses.saved[0]).toMatchObject({
       googleConnectionId: connectionId,
       gmailMessageId: 'message-1',
@@ -62,6 +68,11 @@ describe('Job Search Email analysis flow', () => {
         evidence: ['ニュースレター'],
       }),
     );
+    const newsletter = message('message-1', 'thread-1', 'ニュースレター');
+    dependencies.gmail = new FakeGmailReader(newsletter, {
+      id: 'thread-1',
+      messages: [newsletter],
+    });
     const output = await createJobSearchEmailAgent(dependencies).run(context(), {
       googleConnectionId: connectionId,
       gmailMessageId: 'message-1',
@@ -112,6 +123,26 @@ describe('Job Search Email analysis flow', () => {
     expect(output.result).toBe('needs_review');
     expect(dependencies.analyses.saved).toHaveLength(0);
     expect(dependencies.reviews.saved[0]?.reason).toBe('llm_invalid_output');
+  });
+
+  test('routes schema-valid but ungrounded model output to review before persistence', async () => {
+    const dependencies = createDependencies(
+      analysis({ companyName: '本文にない会社', confidence: 1, evidence: ['本文にない内定'] }),
+    );
+    const output = await createJobSearchEmailAgent(dependencies).run(context(), {
+      googleConnectionId: connectionId,
+      gmailMessageId: 'message-1',
+      gmailThreadId: 'thread-1',
+    });
+
+    expect(output).toEqual({
+      analysis: null,
+      calendarEventId: null,
+      draftId: null,
+      result: 'needs_review',
+    });
+    expect(dependencies.analyses.saved).toHaveLength(0);
+    expect(dependencies.reviews.saved[0]?.reason).toBe('analysis_not_grounded');
   });
 
   test('rejects inconsistent Gmail identifiers before calling the LLM', async () => {

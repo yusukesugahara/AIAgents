@@ -58,7 +58,7 @@ export function registerOAuthRoutes(
   });
   app.get('/auth/google/complete', (context) => {
     context.header('Cache-Control', 'no-store');
-    return context.json({ status: 'completed' });
+    return context.redirect('/setup?oauth=completed', 303);
   });
 }
 

@@ -6,6 +6,7 @@ export interface WorkerHandle {
 }
 
 export interface WorkerOptions {
+  concurrency?: number;
   heartbeatIntervalMs?: number;
   leaseHeartbeatIntervalMs?: number;
   leaseTimeoutMs?: number;
@@ -35,19 +36,22 @@ export async function startWorker(options: WorkerOptions = {}): Promise<WorkerHa
   }
 
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 60_000;
+  const concurrency = options.concurrency ?? 1;
   const leaseHeartbeatIntervalMs = options.leaseHeartbeatIntervalMs ?? 15_000;
   const leaseTimeoutMs = options.leaseTimeoutMs ?? 60_000;
   const pollIntervalMs = options.pollIntervalMs ?? 250;
 
   if (
     !isPositiveSafeInteger(heartbeatIntervalMs) ||
+    !isPositiveSafeInteger(concurrency) ||
+    concurrency > 32 ||
     !isPositiveSafeInteger(leaseTimeoutMs) ||
     !isPositiveSafeInteger(leaseHeartbeatIntervalMs) ||
     !isPositiveSafeInteger(pollIntervalMs) ||
     leaseHeartbeatIntervalMs >= leaseTimeoutMs
   ) {
     throw new Error(
-      'Worker intervals must be positive integers, and the lease heartbeat interval must be shorter than the lease timeout',
+      'Worker intervals must be positive integers; concurrency must be a positive integer at most 32, and the lease heartbeat interval must be shorter than the lease timeout',
     );
   }
   const workerId = options.workerId ?? `worker-${crypto.randomUUID()}`;
@@ -58,144 +62,142 @@ export async function startWorker(options: WorkerOptions = {}): Promise<WorkerHa
   }, heartbeatIntervalMs);
 
   let stopped = false;
-  let currentJob: Promise<void> | undefined;
+  const activeJobs = new Set<Promise<void>>();
+  let pollFailure: unknown;
   let stopPromise: Promise<void> | undefined;
 
   const processNextJob = async (): Promise<void> => {
-    if (stopped || currentJob) {
+    const job = await queue.claimNext({ workerId });
+    if (!job) {
       return;
     }
 
-    currentJob = (async () => {
-      const job = await queue.claimNext({ workerId });
-      if (!job) {
+    // A stop can begin while claimNext is waiting for the database. Do not start
+    // a newly claimed Agent execution after shutdown has started.
+    if (stopped) {
+      await queue.release({ jobId: job.id, workerId });
+      return;
+    }
+
+    const abortController = new AbortController();
+    let executionFinished = false;
+    let leaseLost = false;
+    let extendingLease = false;
+    let leaseExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+    const loseLease = (reason: string): void => {
+      if (leaseLost) {
         return;
       }
 
-      // A stop can begin while claimNext is waiting for the database. Do not start
-      // a newly claimed Agent execution after shutdown has started.
-      if (stopped) {
-        await queue.release({ jobId: job.id, workerId });
+      leaseLost = true;
+      abortController.abort(reason);
+    };
+    const scheduleLeaseExpiry = (): void => {
+      if (executionFinished) {
+        return;
+      }
+      if (leaseExpiryTimer) {
+        clearTimeout(leaseExpiryTimer);
+      }
+      leaseExpiryTimer = setTimeout(() => {
+        loseLease('Job lease renewal deadline exceeded');
+      }, leaseTimeoutMs);
+    };
+    scheduleLeaseExpiry();
+    const extendLease = (): void => {
+      if (extendingLease || leaseLost) {
         return;
       }
 
-      const abortController = new AbortController();
-      let executionFinished = false;
-      let leaseLost = false;
-      let extendingLease = false;
-      let leaseExpiryTimer: ReturnType<typeof setTimeout> | undefined;
-      const loseLease = (reason: string): void => {
-        if (leaseLost) {
-          return;
-        }
+      extendingLease = true;
+      void queue
+        .extendLease({ jobId: job.id, workerId })
+        .then((extended) => {
+          if (executionFinished) {
+            return;
+          }
+          if (!extended) {
+            loseLease('Job lease lost');
+            return;
+          }
 
-        leaseLost = true;
-        abortController.abort(reason);
-      };
-      const scheduleLeaseExpiry = (): void => {
-        if (executionFinished) {
-          return;
-        }
-        if (leaseExpiryTimer) {
-          clearTimeout(leaseExpiryTimer);
-        }
-        leaseExpiryTimer = setTimeout(() => {
-          loseLease('Job lease renewal deadline exceeded');
-        }, leaseTimeoutMs);
-      };
-      scheduleLeaseExpiry();
-      const extendLease = (): void => {
-        if (extendingLease || leaseLost) {
-          return;
-        }
-
-        extendingLease = true;
-        void queue
-          .extendLease({ jobId: job.id, workerId })
-          .then((extended) => {
-            if (executionFinished) {
-              return;
-            }
-            if (!extended) {
-              loseLease('Job lease lost');
-              return;
-            }
-
-            scheduleLeaseExpiry();
-          })
-          .catch((error: unknown) => {
-            if (executionFinished) {
-              return;
-            }
-            console.error(
-              JSON.stringify({
-                event: 'worker.lease_heartbeat.failed',
-                jobId: job.id,
-                message: error instanceof Error ? error.message : 'unknown',
-                workerId,
-              }),
-            );
-          })
-          .finally(() => {
-            extendingLease = false;
-          });
-      };
-      const leaseHeartbeat = setInterval(extendLease, leaseHeartbeatIntervalMs);
-
-      try {
-        await runner.run({
-          agentId: job.agentId,
-          jobId: job.id,
-          input: job.input,
-          signal: abortController.signal,
-          triggerType: job.triggerType,
+          scheduleLeaseExpiry();
+        })
+        .catch((error: unknown) => {
+          if (executionFinished) {
+            return;
+          }
+          console.error(
+            JSON.stringify({
+              event: 'worker.lease_heartbeat.failed',
+              jobId: job.id,
+              message: error instanceof Error ? error.message : 'unknown',
+              workerId,
+            }),
+          );
+        })
+        .finally(() => {
+          extendingLease = false;
         });
-
-        if (leaseLost) {
-          throw new Error(`Job "${job.id}" lease was lost during execution`);
-        }
-      } catch (error) {
-        if (leaseLost) {
-          console.warn(JSON.stringify({ event: 'worker.job.lease_lost', jobId: job.id, workerId }));
-          return;
-        }
-
-        const jobError = error instanceof Error ? error : new Error(String(error));
-        await queue.fail({
-          jobId: job.id,
-          workerId,
-          error: jobError,
-          retryable: isRetryableJobError(error),
-        });
-        return;
-      } finally {
-        executionFinished = true;
-        clearInterval(leaseHeartbeat);
-        if (leaseExpiryTimer) {
-          clearTimeout(leaseExpiryTimer);
-        }
-      }
-
-      await queue.complete({ jobId: job.id, workerId });
-    })();
+    };
+    const leaseHeartbeat = setInterval(extendLease, leaseHeartbeatIntervalMs);
 
     try {
-      await currentJob;
+      await runner.run({
+        agentId: job.agentId,
+        jobId: job.id,
+        input: job.input,
+        signal: abortController.signal,
+        triggerType: job.triggerType,
+      });
+
+      if (leaseLost) {
+        throw new Error(`Job "${job.id}" lease was lost during execution`);
+      }
+    } catch (error) {
+      if (leaseLost) {
+        console.warn(JSON.stringify({ event: 'worker.job.lease_lost', jobId: job.id, workerId }));
+        return;
+      }
+
+      const jobError = error instanceof Error ? error : new Error(String(error));
+      await queue.fail({
+        jobId: job.id,
+        workerId,
+        error: jobError,
+        retryable: isRetryableJobError(error),
+      });
+      return;
     } finally {
-      currentJob = undefined;
+      executionFinished = true;
+      clearInterval(leaseHeartbeat);
+      if (leaseExpiryTimer) {
+        clearTimeout(leaseExpiryTimer);
+      }
     }
+
+    await queue.complete({ jobId: job.id, workerId });
   };
 
   const poll = (): void => {
-    void processNextJob().catch((error: unknown) => {
-      console.error(
-        JSON.stringify({
-          event: 'worker.poll.failed',
-          message: error instanceof Error ? error.message : 'unknown',
-          workerId,
-        }),
-      );
-    });
+    while (!stopped && activeJobs.size < concurrency) {
+      let execution: Promise<void>;
+      execution = processNextJob()
+        .catch((error: unknown) => {
+          pollFailure ??= error;
+          console.error(
+            JSON.stringify({
+              event: 'worker.poll.failed',
+              message: error instanceof Error ? error.message : 'unknown',
+              workerId,
+            }),
+          );
+        })
+        .finally(() => {
+          activeJobs.delete(execution);
+        });
+      activeJobs.add(execution);
+    }
   };
 
   const poller = setInterval(poll, pollIntervalMs);
@@ -212,9 +214,8 @@ export async function startWorker(options: WorkerOptions = {}): Promise<WorkerHa
       clearInterval(poller);
       stopPromise = (async () => {
         try {
-          if (currentJob) {
-            await currentJob;
-          }
+          await Promise.allSettled([...activeJobs]);
+          if (pollFailure) throw pollFailure;
         } finally {
           if (options.database) {
             await options.database.close();

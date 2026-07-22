@@ -1,6 +1,7 @@
 export const defaultTimezone = 'Asia/Tokyo';
 
 export interface JobRuntimeConfig {
+  readonly concurrency: number;
   readonly leaseHeartbeatIntervalMs: number;
   readonly lockTimeoutMs: number;
   readonly maxAttempts: number;
@@ -11,6 +12,69 @@ export interface JobEmailAnalysisRuntimeConfig {
   readonly openAiApiKey: string;
   readonly openAiModel: string;
   readonly openAiReplyModel: string;
+}
+
+export interface GmailPollingRuntimeConfig {
+  readonly intervalMs: number;
+  readonly maxMessages: number;
+  readonly maxResults: number;
+  readonly query: string;
+}
+
+export interface DataRetentionRuntimeConfig {
+  readonly cleanupIntervalMs: number;
+  readonly retentionMs: number;
+}
+
+export function loadDataRetentionRuntimeConfig(
+  environment = process.env,
+): DataRetentionRuntimeConfig {
+  const retentionDays = readPositiveInteger(
+    environment.OPERATIONAL_DATA_RETENTION_DAYS,
+    'OPERATIONAL_DATA_RETENTION_DAYS',
+    90,
+  );
+  if (retentionDays > 3_650) {
+    throw new Error('OPERATIONAL_DATA_RETENTION_DAYS must be at most 3650');
+  }
+  return {
+    cleanupIntervalMs: 24 * 60 * 60 * 1_000,
+    retentionMs: retentionDays * 24 * 60 * 60 * 1_000,
+  };
+}
+
+export function loadGmailPollingRuntimeConfig(
+  environment = process.env,
+): GmailPollingRuntimeConfig {
+  const intervalSeconds = readPositiveInteger(
+    environment.GMAIL_POLL_INTERVAL_SECONDS,
+    'GMAIL_POLL_INTERVAL_SECONDS',
+    300,
+  );
+  if (intervalSeconds > Math.floor(Number.MAX_SAFE_INTEGER / 1_000)) {
+    throw new Error('GMAIL_POLL_INTERVAL_SECONDS is too large');
+  }
+  const maxResults = readPositiveInteger(
+    environment.GMAIL_POLL_MAX_RESULTS,
+    'GMAIL_POLL_MAX_RESULTS',
+    50,
+  );
+  if (maxResults > 100) {
+    throw new Error('GMAIL_POLL_MAX_RESULTS must be at most 100');
+  }
+  const maxMessages = readPositiveInteger(
+    environment.GMAIL_POLL_MAX_MESSAGES,
+    'GMAIL_POLL_MAX_MESSAGES',
+    100,
+  );
+  if (maxMessages > 1_000) {
+    throw new Error('GMAIL_POLL_MAX_MESSAGES must be at most 1000');
+  }
+  const query = (environment.GMAIL_LOOKBACK_QUERY ?? 'in:inbox newer_than:1d').trim();
+  if (!query || query.length > 1_000) {
+    throw new Error('GMAIL_LOOKBACK_QUERY must contain 1 through 1000 characters');
+  }
+  return { intervalMs: intervalSeconds * 1_000, maxMessages, maxResults, query };
 }
 
 export function loadJobEmailAnalysisRuntimeConfig(
@@ -48,7 +112,15 @@ export function loadJobRuntimeConfig(environment = process.env): JobRuntimeConfi
     throw new Error('AGENT_JOB_LEASE_HEARTBEAT_MS must be shorter than the lock timeout');
   }
 
+  const concurrency = readPositiveInteger(
+    environment.AGENT_WORKER_CONCURRENCY,
+    'AGENT_WORKER_CONCURRENCY',
+    2,
+  );
+  if (concurrency > 32) throw new Error('AGENT_WORKER_CONCURRENCY must be at most 32');
+
   return {
+    concurrency,
     leaseHeartbeatIntervalMs,
     lockTimeoutMs,
     maxAttempts: readPositiveInteger(

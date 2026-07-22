@@ -5,7 +5,7 @@ services:
       dockerfile: docker/api.Dockerfile
     command: bun --no-env-file run --filter @ai-agents/database db:migrate
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
+      - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ai_agents
     depends_on:
       postgres:
         condition: service_healthy
@@ -16,18 +16,38 @@ services:
       dockerfile: docker/api.Dockerfile
     command: bun --no-env-file apps/api/src/index.ts
     ports:
-      - "${API_HOST_PORT:-4000}:4000"
+      - "127.0.0.1:${API_HOST_PORT:-4000}:4000"
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
+      - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ai_agents
       - APP_PORT=4000
       - APP_ENV=${APP_ENV:-development}
+      - API_ACCESS_TOKEN=${API_ACCESS_TOKEN:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
-      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:4000/auth/google/callback}
       - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:-}
+      - TOKEN_ENCRYPTION_PREVIOUS_KEYS=${TOKEN_ENCRYPTION_PREVIOUS_KEYS:-}
+      - GMAIL_POLL_INTERVAL_SECONDS=${GMAIL_POLL_INTERVAL_SECONDS:-300}
+      - GMAIL_POLL_MAX_RESULTS=${GMAIL_POLL_MAX_RESULTS:-50}
+      - GMAIL_POLL_MAX_MESSAGES=${GMAIL_POLL_MAX_MESSAGES:-100}
+      - GMAIL_LOOKBACK_QUERY=${GMAIL_LOOKBACK_QUERY:-in:inbox newer_than:1d}
     depends_on:
       migrate:
         condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "--no-env-file",
+          "-e",
+          "const r=await fetch('http://127.0.0.1:4000/health/ready');process.exit(r.ok?0:1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   worker:
     build:
@@ -35,27 +55,35 @@ services:
       dockerfile: docker/worker.Dockerfile
     command: bun --no-env-file apps/worker/src/index.ts
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/ai_agents
+      - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ai_agents
       - APP_ENV=${APP_ENV:-development}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
-      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:4000/auth/google/callback}
       - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:-}
+      - TOKEN_ENCRYPTION_PREVIOUS_KEYS=${TOKEN_ENCRYPTION_PREVIOUS_KEYS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_ANALYSIS_MODEL=${OPENAI_ANALYSIS_MODEL:-}
       - OPENAI_REPLY_MODEL=${OPENAI_REPLY_MODEL:-}
+      - GMAIL_POLL_INTERVAL_SECONDS=${GMAIL_POLL_INTERVAL_SECONDS:-300}
+      - GMAIL_POLL_MAX_RESULTS=${GMAIL_POLL_MAX_RESULTS:-50}
+      - GMAIL_POLL_MAX_MESSAGES=${GMAIL_POLL_MAX_MESSAGES:-100}
+      - GMAIL_LOOKBACK_QUERY=${GMAIL_LOOKBACK_QUERY:-in:inbox newer_than:1d}
+      - AGENT_WORKER_CONCURRENCY=${AGENT_WORKER_CONCURRENCY:-2}
+      - OPERATIONAL_DATA_RETENTION_DAYS=${OPERATIONAL_DATA_RETENTION_DAYS:-90}
     depends_on:
       migrate:
         condition: service_completed_successfully
+    restart: unless-stopped
 
   postgres:
     image: postgres:18.4
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ai_agents
     ports:
-      - "${POSTGRES_HOST_PORT:-15432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -64,6 +92,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 60s
+    restart: unless-stopped
 
 volumes:
   postgres_data:
