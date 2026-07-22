@@ -66,14 +66,14 @@ sequenceDiagram
 
 ## 技術選定
 
-| 領域 | 採用技術 | 選定理由 |
+| 領域 | 採用技術 | 今回この技術を選んだ理由 |
 |---|---|---|
-| 言語・Runtime | TypeScript / Bun | 型安全な実装、テスト、Workspaceを1つの開発体験にまとめるため |
-| API | Hono | OAuth callback、管理画面、実行履歴を小さく実装するため |
-| AI API | OpenAI Responses API | Function CallingとStructured Outputsを同じAPIで直接制御でき、ツール実行・上限制御・安全判定をアプリ側に保持できるため |
-| 永続化・キュー | PostgreSQL / postgres.js | 実行履歴、冪等性、`FOR UPDATE SKIP LOCKED`によるジョブ取得を一貫して扱うため |
-| バリデーション | Zod | HTTP入力、LLM出力、外部API応答を実行時にも検証するため |
-| Google連携 | Gmail API / Calendar API | 実務上のメール下書き・予定登録に直接つなげるため |
+| 言語・Runtime | TypeScript / Bun | Pythonはデータ分析・機械学習基盤を中心にする場合に有力です。一方今回は、Web API、Worker、Agent、共有ライブラリを1つのモノレポで型安全に実装し、同じテスト実行基盤で検証したいためTypeScriptを選びました。BunはそのWorkspace・テスト・TypeScript実行を軽量にまとめられるため採用しています。 |
+| API | Hono | 大規模な認証・画面・多数の業務APIを持つ場合はNestJSやNext.jsが適します。今回はOAuth callback、設定画面、実行履歴、Job投入が中心の小さな管理APIなので、依存を抑えてBun上で動かせるHonoを選びました。 |
+| AI API | OpenAI Responses API | 複数モデルを横断して使い分けることが主目的なら、抽象化SDKやAgent Frameworkが向いています。今回は課題要件である「LLM APIを直接呼び、自前でFunction Callingループを実装する」を重視し、`function_call`、`function_call_output`、Structured Outputsを直接制御できるResponses APIを選びました。 |
+| 永続化・キュー | PostgreSQL / postgres.js | 単純な短時間タスクだけならRedis Queueやインメモリキューでも足ります。今回はGmail Draft・Calendar Eventの冪等性、実行履歴、レビュー、リース付き非同期Jobを一貫して永続化する必要があるため、トランザクションと`FOR UPDATE SKIP LOCKED`を使えるPostgreSQLを選びました。 |
+| バリデーション | Zod | コンパイル時だけの型定義で済む閉じたシステムならTypeScript型だけでも扱えます。今回はHTTP入力、Gmail応答、LLM出力、Function Calling引数など信頼できない入力が多いため、型推論と実行時検証を同じSchemaで扱えるZodを選びました。 |
+| Google連携 | Gmail API / Google Calendar API | メール内容の分類・通知だけが目的なら、ダミーデータや汎用メールAPIでも実装できます。今回は求職者の実業務である受信メール確認、返信下書き、面談予定管理までつなげるため、利用者のGmailとGoogle Calendarを直接扱えるGoogle APIを選びました。 |
 
 詳細は [技術スタック](docs/architecture/technical-stack.md)、[依存関係](docs/architecture/dependency-rules.md)、[エージェント運用ガイド](docs/agents/job-search-email-agent/operation-guide.md) を参照してください。
 
