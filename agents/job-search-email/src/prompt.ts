@@ -7,7 +7,7 @@ export const jobEmailAnalysisSchemaVersion = '1';
 export const jobEmailDefaultTimezone = 'Asia/Tokyo';
 
 const maximumMessages = 20;
-export const maximumPromptPayloadBytes = 512 * 1024;
+export const maximumPromptPayloadBytes = 128 * 1024;
 
 export const jobEmailAnalysisSystemPrompt = `You classify and extract facts from job-search email threads.
 

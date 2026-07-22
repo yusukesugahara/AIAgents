@@ -70,7 +70,9 @@ export class FakeLlmProvider implements LlmProvider {
           data: completed.data,
           metadata: {
             ...response.metadata,
-            toolCalls: [{ callId: 'fake-tool-call', name: tool.name }],
+            toolCalls: [
+              { callId: 'fake-tool-call', name: tool.name, outcome: fakeToolOutcome(output) },
+            ],
           },
           status: 'completed',
         };
@@ -84,7 +86,7 @@ export class FakeLlmProvider implements LlmProvider {
         if (!tool || !arguments_?.success) continue;
         const output = await tool.execute(arguments_.data, { callId: `fake-${name}` });
         this.toolExecutions.push({ arguments: arguments_.data, name, output });
-        executed.push({ callId: `fake-${name}`, name });
+        executed.push({ callId: `fake-${name}`, name, outcome: fakeToolOutcome(output) });
       }
       return {
         data: response.data as TOutput,
@@ -105,7 +107,16 @@ function fakeMetadata(request: ToolLoopLlmRequest<unknown>, toolName: string) {
     promptVersion: request.promptVersion,
     schemaName: request.schemaName,
     schemaVersion: request.schemaVersion,
-    toolCalls: [{ callId: 'fake-tool-call', name: toolName }],
+    toolCalls: [{ callId: 'fake-tool-call', name: toolName, outcome: 'completed' as const }],
     usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
   };
+}
+
+function fakeToolOutcome(output: unknown): 'completed' | 'created' | 'rejected' | 'reused' {
+  if (output && typeof output === 'object' && 'status' in output) {
+    if (output.status === 'created' || output.status === 'rejected' || output.status === 'reused') {
+      return output.status;
+    }
+  }
+  return 'completed';
 }

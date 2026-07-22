@@ -105,7 +105,10 @@ export function startApi(options: StartApiOptions): void {
     googleConnections = new PostgresGoogleConnectionRepository(database);
     try {
       const accessTokenConfig = loadGoogleAccessTokenConfig();
-      const cipher = AesGcmTokenCipher.fromBase64Key(accessTokenConfig.tokenEncryptionKey);
+      const cipher = AesGcmTokenCipher.fromBase64Keys(
+        accessTokenConfig.tokenEncryptionKey,
+        accessTokenConfig.tokenEncryptionPreviousKeys,
+      );
       const accessTokens = new GoogleAccessTokenService({
         cipher,
         credentials: googleConnections,
@@ -124,7 +127,10 @@ export function startApi(options: StartApiOptions): void {
     try {
       const googleOAuthConfig = loadGoogleOAuthConfig();
       googleOAuth = new GoogleOAuthService({
-        cipher: AesGcmTokenCipher.fromBase64Key(googleOAuthConfig.tokenEncryptionKey),
+        cipher: AesGcmTokenCipher.fromBase64Keys(
+          googleOAuthConfig.tokenEncryptionKey,
+          googleOAuthConfig.tokenEncryptionPreviousKeys,
+        ),
         connections: googleConnections,
         provider: options.createGoogleOAuthProvider(googleOAuthConfig),
         states: oauthStates,

@@ -1,6 +1,7 @@
 import type { AgentContext } from '@ai-agents/agent-core';
 import { AgentDependencyError, defineAgent } from '@ai-agents/agent-core';
 import { z } from 'zod';
+import { validateAnalysisGrounding } from './analysis-grounding';
 import { normalizeJobEmailAnalysis } from './analysis-normalization';
 import { createCalendarEvent, prepareCalendarAction } from './calendar-action';
 import { manifest } from './manifest';
@@ -26,7 +27,9 @@ import {
 } from './schemas';
 import { isValidIanaTimeZone } from './validation';
 
+export * from './analysis-grounding';
 export * from './analysis-normalization';
+export * from './evaluation';
 export { manifest } from './manifest';
 export * from './ports';
 export * from './prompt';
@@ -151,6 +154,7 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
             outcome: llmResult.status,
             toolCallCount: llmResult.metadata.toolCalls?.length ?? 0,
             toolNames: llmResult.metadata.toolCalls?.map((toolCall) => toolCall.name) ?? [],
+            toolOutcomes: llmResult.metadata.toolCalls?.map((toolCall) => toolCall.outcome) ?? [],
           };
         },
       );
@@ -175,6 +179,10 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
         return completeTrackedRun(dependencies, context, output, 'llm_invalid_output');
       }
       const analysis = normalizeJobEmailAnalysis(validatedAnalysis.data);
+      if (!validateAnalysisGrounding(analysis, thread).valid) {
+        const output = await saveNeedsReview(dependencies, context, 'analysis_not_grounded');
+        return completeTrackedRun(dependencies, context, output, 'analysis_not_grounded');
+      }
 
       await persistSafely(
         () =>
@@ -235,6 +243,36 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
         return completeTrackedRun(dependencies, context, output, reviewReason);
       }
 
+      // Create/reuse the Calendar event first so its conflict and policy checks are performed
+      // immediately before that write. A conflict still prevents any Draft write.
+      const calendarResult =
+        calendarAction.kind === 'ready'
+          ? await trackStep(
+              dependencies,
+              context,
+              'CREATE_CALENDAR_EVENT',
+              { gmailMessageId: input.gmailMessageId },
+              () => createCalendarEvent(dependencies, context, input, calendarAction),
+              (result) => ({
+                applicable: true,
+                outcome: result.kind,
+                ...(result.kind === 'completed'
+                  ? { calendarEventId: result.eventId }
+                  : { reviewReason: result.reason }),
+              }),
+            )
+          : null;
+      if (calendarResult?.kind === 'needs_review') {
+        const output = await saveNeedsReview(
+          dependencies,
+          context,
+          calendarResult.reason,
+          analysis,
+        );
+        return completeTrackedRun(dependencies, context, output, calendarResult.reason);
+      }
+      const calendarEventId = calendarResult?.kind === 'completed' ? calendarResult.eventId : null;
+
       const draftResult =
         replyAction.kind === 'ready'
           ? await trackStep(
@@ -260,31 +298,32 @@ export function createJobSearchEmailAgent(dependencies: JobSearchEmailAgentDepen
                       draftId: result.draftId,
                       toolCallCount: result.metadata.toolCalls?.length ?? 0,
                       toolNames: result.metadata.toolCalls?.map((toolCall) => toolCall.name) ?? [],
+                      toolOutcomes:
+                        result.metadata.toolCalls?.map((toolCall) => toolCall.outcome) ?? [],
                       writeStatus: result.writeStatus,
                     }
-                  : { reviewReason: result.reason }),
+                  : {
+                      reviewReason: result.reason,
+                      toolCallCount: result.metadata?.toolCalls?.length ?? 0,
+                      toolNames: result.metadata?.toolCalls?.map((toolCall) => toolCall.name) ?? [],
+                      toolOutcomes:
+                        result.metadata?.toolCalls?.map((toolCall) => toolCall.outcome) ?? [],
+                    }),
               }),
             )
           : null;
       if (draftResult?.kind === 'needs_review') {
-        const output = await saveNeedsReview(dependencies, context, draftResult.reason, analysis);
+        const output = await saveNeedsReview(
+          dependencies,
+          context,
+          draftResult.reason,
+          analysis,
+          null,
+          calendarEventId,
+        );
         return completeTrackedRun(dependencies, context, output, draftResult.reason);
       }
       const draftId = draftResult?.kind === 'completed' ? draftResult.draftId : null;
-      const calendarEventId =
-        calendarAction.kind === 'ready'
-          ? await trackStep(
-              dependencies,
-              context,
-              'CREATE_CALENDAR_EVENT',
-              { gmailMessageId: input.gmailMessageId },
-              () => createCalendarEvent(dependencies, context, input, calendarAction),
-              (createdCalendarEventId) => ({
-                applicable: true,
-                calendarEventId: createdCalendarEventId,
-              }),
-            )
-          : null;
       return completeTrackedRun(
         dependencies,
         context,
@@ -320,6 +359,8 @@ async function saveNeedsReview(
   context: AgentContext,
   reason: JobEmailReviewReason,
   analysis: JobEmailAnalysis | null = null,
+  draftId: string | null = null,
+  calendarEventId: string | null = null,
 ): Promise<JobSearchEmailOutput> {
   await persistSafely(
     () =>
@@ -333,8 +374,8 @@ async function saveNeedsReview(
   );
   return {
     analysis,
-    calendarEventId: null,
-    draftId: null,
+    calendarEventId,
+    draftId,
     result: 'needs_review' as const,
   };
 }

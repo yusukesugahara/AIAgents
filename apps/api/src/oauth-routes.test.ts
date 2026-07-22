@@ -5,7 +5,7 @@ import { createApp } from './app';
 const logger = { error() {}, info() {} };
 
 describe('API Google OAuth routes', () => {
-  test('starts and completes public routes without exposing callback credentials', async () => {
+  test('protects OAuth initiation and completes the public callback without exposing credentials', async () => {
     const completed: Array<{ browserNonce: string; code: string; state: string }> = [];
     const cancelled: Array<{ browserNonce: string; state: string }> = [];
     const purposes: Array<'calendar_events' | 'gmail_compose' | 'gmail_read' | undefined> = [];
@@ -31,7 +31,9 @@ describe('API Google OAuth routes', () => {
       requestIdGenerator: () => 'generated-request-id',
     });
 
-    const start = await app.request('/auth/google');
+    expect((await app.request('/auth/google')).status).toBe(401);
+    const authorization = `Basic ${Buffer.from('admin:api-secret').toString('base64')}`;
+    const start = await app.request('/auth/google', { headers: { Authorization: authorization } });
     expect(start.status).toBe(303);
     expect(start.headers.get('location')).toContain('accounts.google.com');
     expect(start.headers.get('cache-control')).toBe('no-store');
@@ -40,10 +42,14 @@ describe('API Google OAuth routes', () => {
     expect(start.headers.get('set-cookie')).toContain('SameSite=Lax');
     const cookie = start.headers.get('set-cookie')?.split(';')[0] ?? '';
 
-    const composeStart = await app.request('/auth/google/compose');
+    const composeStart = await app.request('/auth/google/compose', {
+      headers: { Authorization: authorization },
+    });
     expect(composeStart.status).toBe(303);
     expect(composeStart.headers.get('set-cookie')).toContain('ai_agents_oauth_nonce=');
-    const calendarStart = await app.request('/auth/google/calendar');
+    const calendarStart = await app.request('/auth/google/calendar', {
+      headers: { Authorization: authorization },
+    });
     expect(calendarStart.status).toBe(303);
     expect(calendarStart.headers.get('set-cookie')).toContain('ai_agents_oauth_nonce=');
     expect(purposes).toEqual(['gmail_read', 'gmail_compose', 'calendar_events']);
@@ -59,7 +65,10 @@ describe('API Google OAuth routes', () => {
     expect(completed).toEqual([
       { browserNonce: 'browser-nonce', code: 'code-value', state: 'state-value' },
     ]);
-    const completedPage = await app.request('/auth/google/complete');
+    expect((await app.request('/auth/google/complete')).status).toBe(401);
+    const completedPage = await app.request('/auth/google/complete', {
+      headers: { Authorization: authorization },
+    });
     expect(completedPage.status).toBe(303);
     expect(completedPage.headers.get('location')).toBe('/setup?oauth=completed');
 

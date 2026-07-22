@@ -219,17 +219,17 @@ export const jobSearchEmailOutputSchema = z
         path: ['analysis'],
       });
     }
-    if (output.result !== 'completed' && output.draftId !== null) {
+    if (output.result === 'skipped' && output.draftId !== null) {
       context.addIssue({
         code: 'custom',
-        message: 'Only completed results may contain a Draft ID',
+        message: 'Skipped results cannot contain a Draft ID',
         path: ['draftId'],
       });
     }
-    if (output.result !== 'completed' && output.calendarEventId !== null) {
+    if (output.result === 'skipped' && output.calendarEventId !== null) {
       context.addIssue({
         code: 'custom',
-        message: 'Only completed results may contain a Calendar event ID',
+        message: 'Skipped results cannot contain a Calendar event ID',
         path: ['calendarEventId'],
       });
     }

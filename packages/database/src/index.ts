@@ -5,6 +5,7 @@ import {
 } from './client';
 
 export { PostgresAgentRunRepository } from './postgres-agent-run';
+export { PostgresOperationalDataRetentionRepository } from './postgres-data-retention';
 export {
   PostgresGoogleConnectionRepository,
   PostgresOAuthStateRepository,

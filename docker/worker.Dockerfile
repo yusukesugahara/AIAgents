@@ -12,4 +12,6 @@ COPY README.md ./
 
 RUN bun --no-env-file install --frozen-lockfile
 
+USER bun
+
 CMD ["bun", "--no-env-file", "apps/worker/src/index.ts"]

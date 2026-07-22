@@ -14,11 +14,11 @@ import {
 
 import { startWorker } from './worker';
 
-function createJob(): AgentJob {
+function createJob(id = 'job-123'): AgentJob {
   const now = new Date('2026-07-19T00:00:00.000Z');
 
   return {
-    id: 'job-123',
+    id,
     agentId: 'test-agent',
     input: { greeting: 'Hello' },
     triggerType: 'manual',
@@ -198,6 +198,33 @@ describe('worker', () => {
       }),
     ]);
     expect(queue.completed).toEqual([{ jobId: 'job-123', workerId: 'test-worker' }]);
+  });
+
+  test('runs only the configured number of Jobs concurrently', async () => {
+    const queue = new FakeJobQueue([createJob('job-1'), createJob('job-2'), createJob('job-3')]);
+    let active = 0;
+    let maximumActive = 0;
+    const releases: Array<() => void> = [];
+    const runner = {
+      run: async () => {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        active -= 1;
+        return { runId: crypto.randomUUID(), output: {} };
+      },
+    } as unknown as AgentRunner;
+    const worker = await startWorker({ concurrency: 2, pollIntervalMs: 1, queue, runner });
+
+    await waitFor(() => active === 2);
+    expect(maximumActive).toBe(2);
+    expect(queue.claimedBy).toHaveLength(2);
+    releases.shift()?.();
+    await waitFor(() => queue.completed.length === 1 && active === 2);
+    expect(maximumActive).toBe(2);
+    for (const release of releases.splice(0)) release();
+    await waitFor(() => queue.completed.length === 3);
+    await worker.stop();
   });
 
   test('marks retryable Agent failures for retry', async () => {

@@ -67,7 +67,7 @@ export function analysis(overrides: Partial<JobEmailAnalysis> = {}): JobEmailAna
 export function message(
   id = 'message-1',
   threadId = 'thread-1',
-  bodyText = '選考結果をご案内します',
+  bodyText = 'Example株式会社 採用担当者より、選考結果をご案内します。面談は2026年7月21日 10:00〜11:00、URL: https://meet.example.com/interview',
   sentAt = new Date('2026-07-19T01:00:00.000Z'),
 ): EmailMessage {
   return {

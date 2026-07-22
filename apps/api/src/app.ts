@@ -2,7 +2,7 @@ import { AgentCoreError, IdempotencyConflictError } from '@ai-agents/agent-core'
 import { GoogleOAuthError } from '@ai-agents/google-oauth';
 import { Hono } from 'hono';
 import { type ApiAppOptions, type ApiEnvironment, ApiError, type ApiLogger } from './api-types';
-import { errorResponse, hasValidBearerToken, isPublicPath, oauthErrorMessage } from './http';
+import { errorResponse, hasValidAccessToken, isPublicPath, oauthErrorMessage } from './http';
 import { registerAgentRoutes } from './routes/agents';
 import { registerHealthRoutes } from './routes/health';
 import { registerOAuthRoutes } from './routes/oauth';
@@ -25,8 +25,9 @@ export function createApp(options: ApiAppOptions = {}): Hono<ApiEnvironment> {
       if (
         options.accessToken &&
         !isPublicPath(new URL(context.req.url).pathname) &&
-        !hasValidBearerToken(context.req.header('Authorization'), options.accessToken)
+        !hasValidAccessToken(context.req.header('Authorization'), options.accessToken)
       ) {
+        context.header('WWW-Authenticate', 'Basic realm="AIAgents", charset="UTF-8"');
         return errorResponse(context, 'UNAUTHORIZED', 401, 'Authentication is required');
       }
       await next();

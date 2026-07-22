@@ -17,6 +17,7 @@ export interface ScheduledGmailPollOptions {
   /** A unique prefix deliberately bypasses a prior poll Job for a safe re-run. */
   readonly idempotencyKeyPrefix?: string;
   readonly logger: ScheduledGmailPollLogger;
+  readonly maxMessages: number;
   readonly maxResults: number;
   readonly query: string;
   readonly queue: Pick<JobQueue, 'enqueue'>;
@@ -41,6 +42,9 @@ const maximumPagesPerConnection = 100;
 export async function enqueueScheduledGmailPoll(
   options: ScheduledGmailPollOptions,
 ): Promise<ScheduledGmailPollResult> {
+  if (!Number.isSafeInteger(options.maxMessages) || options.maxMessages < 1) {
+    throw new Error('Gmail polling max messages must be a positive integer');
+  }
   let eligibleConnections = 0;
   let connectionFailures = 0;
   let enqueueFailures = 0;
@@ -63,7 +67,9 @@ export async function enqueueScheduledGmailPoll(
       eligibleConnections += 1;
       let pageToken: string | undefined;
       const seenPageTokens = new Set<string>();
-      for (let pageNumber = 0; pageNumber < maximumPagesPerConnection; pageNumber += 1) {
+      const seenThreadIds = new Set<string>();
+      let selectedMessages = 0;
+      pageLoop: for (let pageNumber = 0; pageNumber < maximumPagesPerConnection; pageNumber += 1) {
         const page = await options.gmail.listMessages({
           googleConnectionId: connection.id,
           maxResults: options.maxResults,
@@ -72,6 +78,11 @@ export async function enqueueScheduledGmailPoll(
         });
         messagesFound += page.messages.length;
         for (const message of page.messages) {
+          // Gmail lists newest references first. Only the newest message from each thread is
+          // selected during a bounded poll, preventing duplicate analysis of one conversation.
+          if (seenThreadIds.has(message.threadId)) continue;
+          seenThreadIds.add(message.threadId);
+          selectedMessages += 1;
           try {
             await options.queue.enqueue({
               agentId: 'job-search-email',
@@ -81,7 +92,7 @@ export async function enqueueScheduledGmailPoll(
                 gmailThreadId: message.threadId,
                 googleConnectionId: connection.id,
               },
-              retryFailed: true,
+              retryFailed: false,
               triggerType: 'schedule',
             });
             jobRequestsAccepted += 1;
@@ -92,6 +103,7 @@ export async function enqueueScheduledGmailPoll(
               event: 'gmail.poll.enqueue_failed',
             });
           }
+          if (selectedMessages >= options.maxMessages) break pageLoop;
         }
         if (!page.nextPageToken) break;
         if (seenPageTokens.has(page.nextPageToken)) {

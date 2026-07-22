@@ -208,7 +208,7 @@ describe('Setup Web routes', () => {
           gmailThreadId: 'thread-1',
           googleConnectionId: connectionId,
         },
-        retryFailed: true,
+        retryFailed: false,
         triggerType: 'schedule',
       },
       {
@@ -219,7 +219,7 @@ describe('Setup Web routes', () => {
           gmailThreadId: 'thread-2',
           googleConnectionId: connectionId,
         },
-        retryFailed: true,
+        retryFailed: false,
         triggerType: 'schedule',
       },
     ]);
@@ -262,7 +262,7 @@ describe('Setup Web routes', () => {
         gmailThreadId: 'thread-1',
         googleConnectionId: connectionId,
       },
-      retryFailed: true,
+      retryFailed: false,
       triggerType: 'schedule',
     });
 

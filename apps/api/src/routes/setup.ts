@@ -26,6 +26,7 @@ const csrfCookieName = 'ai_agents_setup_csrf';
 const csrfTokenPattern = /^[a-f0-9]{32}$/u;
 const gmailMetadataFetchConcurrency = 5;
 const defaultScheduledGmailPoll = {
+  maxMessages: 100,
   maxResults: 50,
   query: 'in:inbox newer_than:1d',
 } as const;
@@ -67,6 +68,7 @@ export function registerSetupRoutes(
           logger.error({ ...entry, requestId: context.get('requestId'), source: 'setup' });
         },
       },
+      maxMessages: polling.maxMessages,
       maxResults: polling.maxResults,
       query: polling.query,
       queue: requireQueue(options),

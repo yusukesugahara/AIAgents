@@ -47,8 +47,8 @@ describe('Job Search Email Run step flow', () => {
       'ANALYZE_EMAIL',
       'CHECK_REPLY_POLICY',
       'CHECK_CALENDAR_POLICY',
-      'CREATE_DRAFT',
       'CREATE_CALENDAR_EVENT',
+      'CREATE_DRAFT',
       'COMPLETE',
     ]);
     expect(steps.started.map((step) => step.sequence)).toEqual([10, 20, 30, 40, 50, 60, 70]);
@@ -60,6 +60,7 @@ describe('Job Search Email Run step flow', () => {
       outcome: 'completed',
       toolCallCount: 2,
       toolNames: ['get_email_thread', 'get_agent_context'],
+      toolOutcomes: ['completed', 'completed'],
     });
     expect(steps.completed.at(-1)?.output).toEqual({
       calendarEventId: output.calendarEventId,

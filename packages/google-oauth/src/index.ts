@@ -50,11 +50,12 @@ export interface GoogleOAuthConfig {
   readonly clientSecret: string;
   readonly redirectUri: string;
   readonly tokenEncryptionKey: string;
+  readonly tokenEncryptionPreviousKeys: readonly string[];
 }
 
 export type GoogleAccessTokenConfig = Pick<
   GoogleOAuthConfig,
-  'clientId' | 'clientSecret' | 'tokenEncryptionKey'
+  'clientId' | 'clientSecret' | 'tokenEncryptionKey' | 'tokenEncryptionPreviousKeys'
 >;
 
 export interface GoogleAuthorizationRequest {
@@ -398,24 +399,24 @@ export class GoogleAccessTokenService implements GoogleAccessTokenProvider {
 
 export class AesGcmTokenCipher implements TokenCipher {
   static fromBase64Key(value: string): AesGcmTokenCipher {
-    const normalized = value.trim();
-    const key = Buffer.from(normalized, 'base64');
-
-    if (key.length !== 32 || Buffer.from(key).toString('base64') !== normalized) {
-      throw new GoogleOAuthError(
-        'OAUTH_CONFIGURATION_INVALID',
-        'TOKEN_ENCRYPTION_KEY must be a 32-byte Base64 value',
-      );
-    }
-
-    return new AesGcmTokenCipher(key);
+    return AesGcmTokenCipher.fromBase64Keys(value);
   }
 
-  constructor(private readonly key: Uint8Array) {}
+  static fromBase64Keys(
+    primaryValue: string,
+    previousValues: readonly string[] = [],
+  ): AesGcmTokenCipher {
+    return new AesGcmTokenCipher([
+      parseTokenEncryptionKey(primaryValue),
+      ...previousValues.map(parseTokenEncryptionKey),
+    ]);
+  }
+
+  constructor(private readonly keys: readonly Uint8Array[]) {}
 
   encrypt(plaintext: string): string {
     const iv = nodeRandomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', this.key, iv);
+    const cipher = createCipheriv('aes-256-gcm', this.keys[0] as Uint8Array, iv);
     const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
     const tag = cipher.getAuthTag();
 
@@ -431,23 +432,38 @@ export class AesGcmTokenCipher implements TokenCipher {
       );
     }
 
-    try {
-      const iv = Buffer.from(ivValue, 'base64url');
-      const tag = Buffer.from(tagValue, 'base64url');
-      const ciphertext = Buffer.from(ciphertextValue, 'base64url');
-      if (iv.length !== 12 || tag.length !== 16 || ciphertext.length === 0) {
-        throw new Error('Invalid ciphertext');
-      }
-      const decipher = createDecipheriv('aes-256-gcm', this.key, iv);
-      decipher.setAuthTag(tag);
-      return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
-    } catch {
+    const iv = Buffer.from(ivValue, 'base64url');
+    const tag = Buffer.from(tagValue, 'base64url');
+    const ciphertext = Buffer.from(ciphertextValue, 'base64url');
+    if (iv.length !== 12 || tag.length !== 16 || ciphertext.length === 0) {
       throw new GoogleOAuthError(
         'OAUTH_STATE_INVALID',
         'OAuth authorization is invalid or expired',
       );
     }
+    for (const key of this.keys) {
+      try {
+        const decipher = createDecipheriv('aes-256-gcm', key, iv);
+        decipher.setAuthTag(tag);
+        return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+      } catch {
+        // Continue through the explicitly configured rotation keyring.
+      }
+    }
+    throw new GoogleOAuthError('OAUTH_STATE_INVALID', 'OAuth authorization is invalid or expired');
   }
+}
+
+function parseTokenEncryptionKey(value: string): Uint8Array {
+  const normalized = value.trim();
+  const key = Buffer.from(normalized, 'base64');
+  if (key.length !== 32 || Buffer.from(key).toString('base64') !== normalized) {
+    throw new GoogleOAuthError(
+      'OAUTH_CONFIGURATION_INVALID',
+      'TOKEN_ENCRYPTION_KEY must be a 32-byte Base64 value',
+    );
+  }
+  return key;
 }
 
 export interface GoogleOAuthServiceOptions {
@@ -800,14 +816,18 @@ export function loadGoogleAccessTokenConfig(environment = process.env): GoogleAc
   const clientId = environment.GOOGLE_CLIENT_ID?.trim();
   const clientSecret = environment.GOOGLE_CLIENT_SECRET?.trim();
   const tokenEncryptionKey = environment.TOKEN_ENCRYPTION_KEY?.trim();
+  const tokenEncryptionPreviousKeys = (environment.TOKEN_ENCRYPTION_PREVIOUS_KEYS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
   if (!clientId || !clientSecret || !tokenEncryptionKey) {
     throw new GoogleOAuthError(
       'OAUTH_CONFIGURATION_INVALID',
       'Google access token service is not configured',
     );
   }
-  AesGcmTokenCipher.fromBase64Key(tokenEncryptionKey);
-  return { clientId, clientSecret, tokenEncryptionKey };
+  AesGcmTokenCipher.fromBase64Keys(tokenEncryptionKey, tokenEncryptionPreviousKeys);
+  return { clientId, clientSecret, tokenEncryptionKey, tokenEncryptionPreviousKeys };
 }
 
 function isValidEmail(value: string): boolean {

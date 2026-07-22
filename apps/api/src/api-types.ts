@@ -37,7 +37,7 @@ export interface ApiAppOptions {
   googleOAuth?: Pick<GoogleOAuthService, 'begin' | 'cancel' | 'complete'>;
   gmail?: Pick<GmailReader, 'getMessage' | 'listMessages'>;
   gmailDrafts?: Pick<GmailDraftWriter, 'createReplyDraft' | 'findReplyDraft'>;
-  gmailPolling?: Pick<GmailPollingRuntimeConfig, 'maxResults' | 'query'>;
+  gmailPolling?: Pick<GmailPollingRuntimeConfig, 'maxMessages' | 'maxResults' | 'query'>;
   jobEmailSettings?: Pick<
     PostgresJobEmailSettingsRepository,
     'getReplySettings' | 'saveReplySettings'

@@ -47,7 +47,7 @@ const claimedJobColumns = `
 export interface PostgresJobQueueOptions {
   readonly lockTimeoutMs?: number;
   readonly maxAttempts?: number;
-  /** Retry waits; with the default maxAttempts=3, attempts include the initial run, so 1s and 2s apply. */
+  /** Retry waits; attempts include the initial run. Defaults are 30 seconds and 5 minutes. */
   readonly retryDelaysMs?: readonly number[];
 }
 
@@ -62,7 +62,7 @@ export class PostgresJobQueue implements JobQueue {
   ) {
     this.#lockTimeoutMs = options.lockTimeoutMs ?? 60_000;
     this.#maxAttempts = options.maxAttempts ?? 3;
-    this.#retryDelaysMs = options.retryDelaysMs ?? [1_000, 2_000];
+    this.#retryDelaysMs = options.retryDelaysMs ?? [30_000, 300_000];
 
     if (!Number.isSafeInteger(this.#lockTimeoutMs) || this.#lockTimeoutMs <= 0) {
       throw new Error('Job lock timeout must be a positive integer');

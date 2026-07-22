@@ -73,6 +73,8 @@ export interface ToolLoopLlmRequest<TOutput> extends StructuredLlmRequest<TOutpu
 export interface LlmToolCallMetadata {
   readonly callId: string;
   readonly name: string;
+  /** Application-side tool result, distinct from the LLM protocol outcome. */
+  readonly outcome: 'completed' | 'created' | 'rejected' | 'reused';
 }
 
 export interface LlmInvocationMetadata {
@@ -479,15 +481,23 @@ export class OpenAiLlmProvider implements LlmProvider {
           });
         }
         for (const call of validatedCalls) {
-          const output = await call.tool.execute(call.arguments, {
-            callId: call.callId,
-            ...(externalSignal ? { signal: externalSignal } : {}),
-          });
+          const output = await Promise.race([
+            call.tool.execute(call.arguments, {
+              callId: call.callId,
+              signal: controller.signal,
+            }),
+            timeoutError,
+            cancellationError,
+          ]);
           const callCount = (toolCallCounts.get(call.tool.name) ?? 0) + 1;
           toolCallCounts.set(call.tool.name, callCount);
           calledToolNames.add(call.tool.name);
           seenCallIds.add(call.callId);
-          toolCalls.push({ callId: call.callId, name: call.tool.name });
+          toolCalls.push({
+            callId: call.callId,
+            name: call.tool.name,
+            outcome: toolCallOutcome(output),
+          });
           input.push({
             call_id: call.callId,
             output: serializeToolOutput(output),
@@ -881,6 +891,14 @@ function addUsage(left: LlmUsage, right: LlmUsage): LlmUsage {
     outputTokens: left.outputTokens + right.outputTokens,
     totalTokens: left.totalTokens + right.totalTokens,
   };
+}
+
+function toolCallOutcome(output: unknown): 'completed' | 'created' | 'rejected' | 'reused' {
+  if (output && typeof output === 'object' && 'status' in output) {
+    const status = output.status;
+    if (status === 'created' || status === 'rejected' || status === 'reused') return status;
+  }
+  return 'completed';
 }
 
 function invalidToolLoopAttempt<TOutput>(

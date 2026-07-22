@@ -46,7 +46,7 @@ describe('API middleware and errors', () => {
     });
   });
 
-  test('requires a configured Bearer token except for health checks', async () => {
+  test('accepts Bearer and browser Basic credentials except on health checks', async () => {
     const app = createApp({
       accessToken: 'test-token',
       logger: { error() {}, info() {} },
@@ -59,6 +59,11 @@ describe('API middleware and errors', () => {
     const denied = await app.request('/agents');
     const allowed = await app.request('/agents', {
       headers: { Authorization: 'Bearer test-token' },
+    });
+    const browserAllowed = await app.request('/agents', {
+      headers: {
+        Authorization: `Basic ${Buffer.from('admin:test-token').toString('base64')}`,
+      },
     });
     const health = await app.request('/health/live');
     const readiness = await app.request('/health/ready');
@@ -73,6 +78,8 @@ describe('API middleware and errors', () => {
       },
     });
     expect(allowed.status).toBe(200);
+    expect(browserAllowed.status).toBe(200);
+    expect(denied.headers.get('www-authenticate')).toContain('Basic');
     expect(health.status).toBe(200);
     expect(readiness.status).toBe(503);
     expect(unknownHealthRoute.status).toBe(401);

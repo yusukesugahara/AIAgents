@@ -99,7 +99,7 @@ describe('Gmail poller', () => {
           gmailThreadId: 'thread-1',
           googleConnectionId: connectionOne.id,
         },
-        retryFailed: true,
+        retryFailed: false,
         triggerType: 'schedule',
       },
       {
@@ -110,7 +110,7 @@ describe('Gmail poller', () => {
           gmailThreadId: 'thread-2',
           googleConnectionId: connectionOne.id,
         },
-        retryFailed: true,
+        retryFailed: false,
         triggerType: 'schedule',
       },
     ]);
@@ -164,6 +164,50 @@ describe('Gmail poller', () => {
         gmailThreadId: 'thread-2',
         googleConnectionId: connectionOne.id,
       },
+    ]);
+  });
+
+  test('caps each connection and selects only the newest message per thread', async () => {
+    const enqueued: EnqueueJobInput[] = [];
+    let requests = 0;
+    const poller = startGmailPoller({
+      connections: { listConnections: async () => [connectionOne] },
+      gmail: {
+        listMessages: async () => {
+          requests += 1;
+          return {
+            messages: [
+              { id: 'newest-in-thread', threadId: 'thread-1' },
+              { id: 'older-in-thread', threadId: 'thread-1' },
+              { id: 'second-thread', threadId: 'thread-2' },
+              { id: 'over-cap', threadId: 'thread-3' },
+            ],
+            nextPageToken: 'page-that-must-not-be-read',
+          };
+        },
+      },
+      intervalMs: 300_000,
+      logger: { error() {}, info() {} },
+      maxMessages: 2,
+      maxResults: 50,
+      query: 'in:inbox',
+      queue: {
+        enqueue: async (input) => {
+          enqueued.push(input);
+          return job(input);
+        },
+      },
+      runImmediately: false,
+      settings: { getReplySettings: async () => enabledSettings },
+    });
+
+    await poller.pollNow();
+    await poller.stop();
+
+    expect(requests).toBe(1);
+    expect(enqueued.map((input) => input.input)).toEqual([
+      expect.objectContaining({ gmailMessageId: 'newest-in-thread' }),
+      expect.objectContaining({ gmailMessageId: 'second-thread' }),
     ]);
   });
 

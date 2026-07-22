@@ -35,6 +35,7 @@ export interface JobEmailAnalysisRepository {
 }
 
 export type JobEmailReviewReason =
+  | 'analysis_not_grounded'
   | 'llm_invalid_output'
   | 'llm_refusal'
   | 'reply_analysis_low_confidence'
@@ -51,6 +52,7 @@ export type JobEmailReviewReason =
   | 'calendar_information_missing'
   | 'calendar_low_confidence'
   | 'calendar_permission_missing'
+  | 'calendar_policy_changed'
   | 'calendar_settings_missing';
 
 export type JobEmailReplyNotApplicableReason = 'reply_creation_disabled' | 'reply_not_required';

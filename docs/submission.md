@@ -27,7 +27,7 @@
 2. 下書きループで`create_reply_draft`または`create_scheduling_placeholder_draft`を呼ぶ。
 3. tool callの名前・引数をZodで検証し、アプリ側で実行する。
 4. 同じ`call_id`の`function_call_output`を返し、最終回答まで上限付きで反復する。
-5. ツール名・回数・作成/再利用状態だけをRun Stepへ記録する。
+5. ツール名・回数・`created` / `reused` / `rejected`をRun Stepへ記録し、LLMプロトコルの成否と区別する。
 6. Policyと冪等性を外部書き込み境界に残し、メール送信・削除ツールを公開しない。
 
 ## 30分デモの進め方
@@ -48,3 +48,4 @@
 - Gmail Draft ID、Calendar Event ID、Jobの冪等性キーを分けて、同じメールの重複処理を防ぐ。
 - 失敗を握りつぶさず、Run・Step・安全なエラーコードとして残す。
 - メール本文やPromptを永続化しないことで、業務メールの露出を最小化する。
+- モデルの信頼度を鵜呑みにせず、抽出した固有名詞・URL・根拠をGmail原文と照合する。

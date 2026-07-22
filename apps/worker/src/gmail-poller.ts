@@ -21,6 +21,7 @@ export interface GmailPollerOptions {
   readonly gmail: Pick<GmailReader, 'listMessages'>;
   readonly intervalMs: number;
   readonly logger?: GmailPollerLogger;
+  readonly maxMessages?: number;
   readonly maxResults?: number;
   readonly query: string;
   readonly queue: Pick<JobQueue, 'enqueue'>;
@@ -36,6 +37,10 @@ export function startGmailPoller(options: GmailPollerOptions): GmailPollerHandle
   if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 100) {
     throw new Error('Gmail polling max results must be 1 through 100');
   }
+  const maxMessages = options.maxMessages ?? 100;
+  if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 1_000) {
+    throw new Error('Gmail polling max messages must be 1 through 1000');
+  }
   const query = options.query.trim();
   if (!query) throw new Error('Gmail polling query must not be empty');
 
@@ -50,6 +55,7 @@ export function startGmailPoller(options: GmailPollerOptions): GmailPollerHandle
       gmail: options.gmail,
       idempotencyKeyPrefix: 'gmail-poll',
       logger,
+      maxMessages,
       maxResults,
       query,
       queue: options.queue,
@@ -82,7 +88,12 @@ export function startGmailPoller(options: GmailPollerOptions): GmailPollerHandle
   const timer = setInterval(() => {
     void pollNow();
   }, options.intervalMs);
-  logger.info({ event: 'gmail.poller.started', intervalMs: options.intervalMs, maxResults });
+  logger.info({
+    event: 'gmail.poller.started',
+    intervalMs: options.intervalMs,
+    maxMessages,
+    maxResults,
+  });
   if (options.runImmediately ?? true) void pollNow();
 
   return {

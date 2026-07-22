@@ -1,6 +1,7 @@
 import { createRuntimeAgentRegistry } from '@ai-agents/agent-composition';
 import { AgentRunner } from '@ai-agents/agent-core';
 import {
+  loadDataRetentionRuntimeConfig,
   loadGmailPollingRuntimeConfig,
   loadJobEmailAnalysisRuntimeConfig,
   loadJobRuntimeConfig,
@@ -22,6 +23,7 @@ import {
   PostgresJobEmailSettingsRepository,
   PostgresJobQueue,
   PostgresLlmInvocationRepository,
+  PostgresOperationalDataRetentionRepository,
 } from '@ai-agents/database';
 import {
   AesGcmTokenCipher,
@@ -31,6 +33,7 @@ import {
 } from '@ai-agents/google-oauth';
 import { createJobSearchEmailAgent } from '@ai-agents/job-search-email';
 import { OpenAiLlmProvider } from '@ai-agents/llm';
+import { startDataRetentionCleanup } from './data-retention';
 import { startGmailPoller } from './gmail-poller';
 import { startWorker } from './worker';
 
@@ -38,6 +41,7 @@ let database: DatabaseConnection | undefined;
 const jobRuntimeConfig = loadJobRuntimeConfig();
 const analysisRuntimeConfig = loadJobEmailAnalysisRuntimeConfig();
 const gmailPollingConfig = loadGmailPollingRuntimeConfig();
+const dataRetentionConfig = loadDataRetentionRuntimeConfig();
 const googleAccessTokenConfig = loadGoogleAccessTokenConfig();
 
 try {
@@ -58,7 +62,10 @@ if (!database) {
 const googleConnections = new PostgresGoogleConnectionRepository(database);
 const runs = new PostgresAgentRunRepository(database);
 const accessTokens = new GoogleAccessTokenService({
-  cipher: AesGcmTokenCipher.fromBase64Key(googleAccessTokenConfig.tokenEncryptionKey),
+  cipher: AesGcmTokenCipher.fromBase64Keys(
+    googleAccessTokenConfig.tokenEncryptionKey,
+    googleAccessTokenConfig.tokenEncryptionPreviousKeys,
+  ),
   credentials: googleConnections,
   refresher: new HttpGoogleTokenRefresher(googleAccessTokenConfig),
 });
@@ -84,6 +91,7 @@ const jobSearchEmailAgent = createJobSearchEmailAgent({
 });
 
 const worker = await startWorker({
+  concurrency: jobRuntimeConfig.concurrency,
   database,
   leaseHeartbeatIntervalMs: jobRuntimeConfig.leaseHeartbeatIntervalMs,
   leaseTimeoutMs: jobRuntimeConfig.lockTimeoutMs,
@@ -101,10 +109,16 @@ const gmailPoller = startGmailPoller({
   connections: googleConnections,
   gmail,
   intervalMs: gmailPollingConfig.intervalMs,
+  maxMessages: gmailPollingConfig.maxMessages,
   maxResults: gmailPollingConfig.maxResults,
   query: gmailPollingConfig.query,
   queue,
   settings,
+});
+const dataRetention = startDataRetentionCleanup({
+  cleanupIntervalMs: dataRetentionConfig.cleanupIntervalMs,
+  repository: new PostgresOperationalDataRetentionRepository(database),
+  retentionMs: dataRetentionConfig.retentionMs,
 });
 
 let shutdownPromise: Promise<void> | undefined;
@@ -124,6 +138,17 @@ const shutdown = async (): Promise<void> => {
       console.error(
         JSON.stringify({
           event: 'gmail.poller.shutdown_failed',
+          message: error instanceof Error ? error.message : 'unknown',
+        }),
+      );
+    }
+    try {
+      await dataRetention.stop();
+    } catch (error) {
+      exitCode = 1;
+      console.error(
+        JSON.stringify({
+          event: 'data_retention.shutdown_failed',
           message: error instanceof Error ? error.message : 'unknown',
         }),
       );

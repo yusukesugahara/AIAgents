@@ -595,9 +595,9 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
       }
     });
 
-    test('uses 1s and 2s retry waits and fails after the third attempt', async () => {
+    test('uses configured retry waits and fails after the third attempt', async () => {
       const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
-      const queue = new PostgresJobQueue(connection);
+      const queue = new PostgresJobQueue(connection, { retryDelaysMs: [1_000, 2_000] });
       const agentId = `backoff-agent-${crypto.randomUUID()}`;
       const idempotencyKey = `backoff-${crypto.randomUUID()}`;
 

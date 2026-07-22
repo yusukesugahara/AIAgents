@@ -156,7 +156,11 @@ export type ReplyDraftToolResult =
       readonly metadata: LlmInvocationMetadata;
       readonly writeStatus: 'created' | 'reused';
     }
-  | { readonly kind: 'needs_review'; readonly reason: JobEmailReviewReason };
+  | {
+      readonly kind: 'needs_review';
+      readonly metadata?: LlmInvocationMetadata;
+      readonly reason: JobEmailReviewReason;
+    };
 
 type DraftExecutionResult =
   | {
@@ -253,7 +257,7 @@ export async function runReplyDraftToolLoop(
   if (toolResult?.kind === 'completed') {
     return { ...toolResult, metadata: llmResult.metadata };
   }
-  if (toolResult) return toolResult;
+  if (toolResult) return { ...toolResult, metadata: llmResult.metadata };
   return {
     kind: 'needs_review',
     reason:

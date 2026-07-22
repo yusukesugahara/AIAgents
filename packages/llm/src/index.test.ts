@@ -165,7 +165,7 @@ describe('OpenAiLlmProvider', () => {
     expect(result).toMatchObject({
       data: { category: 'interview' },
       metadata: {
-        toolCalls: [{ callId: 'call-1', name: 'get_weather' }],
+        toolCalls: [{ callId: 'call-1', name: 'get_weather', outcome: 'completed' }],
         usage: { inputTokens: 30, outputTokens: 9, totalTokens: 39 },
       },
       status: 'completed',
@@ -632,6 +632,50 @@ describe('OpenAiLlmProvider', () => {
       code: 'TEMPORARY_UNAVAILABLE',
       retryable: true,
     });
+
+    const toolTimeoutRepository = new FakeInvocationRepository();
+    const toolTimeoutProvider = new OpenAiLlmProvider({
+      client: new FakeOpenAiToolClient([
+        {
+          output: [
+            {
+              arguments: '{}',
+              callId: 'slow-call',
+              content: [],
+              name: 'slow_tool',
+              type: 'function_call',
+            },
+          ],
+          rawOutput: [],
+        },
+      ]),
+      invocationRepository: toolTimeoutRepository,
+      timeoutMs: 1,
+    });
+    await expect(
+      toolTimeoutProvider.runToolLoop({
+        ...createRequest(),
+        maxToolCalls: 1,
+        maxTurns: 1,
+        requiredToolNames: ['slow_tool'],
+        tools: [
+          {
+            description: 'Never completes.',
+            execute: async () => new Promise(() => undefined),
+            maxCalls: 1,
+            name: 'slow_tool',
+            parameters: {
+              additionalProperties: false,
+              properties: {},
+              required: [],
+              type: 'object',
+            },
+            schema: z.object({}).strict(),
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPORARY_UNAVAILABLE', retryable: true });
+    expect(toolTimeoutRepository.records).toEqual([expect.objectContaining({ outcome: 'failed' })]);
 
     const networkProvider = new OpenAiLlmProvider({
       client: new FakeOpenAiClient([new Error('network unavailable')]),

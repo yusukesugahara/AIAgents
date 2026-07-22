@@ -158,6 +158,22 @@ describe('Google OAuth', () => {
     );
   });
 
+  test('decrypts with an explicit previous key while encrypting only with the primary key', () => {
+    const previousKey = Buffer.alloc(32, 9).toString('base64');
+    const primaryKey = Buffer.alloc(32, 10).toString('base64');
+    const previousCipher = AesGcmTokenCipher.fromBase64Key(previousKey);
+    const rotatingCipher = AesGcmTokenCipher.fromBase64Keys(primaryKey, [previousKey]);
+
+    expect(rotatingCipher.decrypt(previousCipher.encrypt('old-refresh-token'))).toBe(
+      'old-refresh-token',
+    );
+    const newlyEncrypted = rotatingCipher.encrypt('new-refresh-token');
+    expect(AesGcmTokenCipher.fromBase64Key(primaryKey).decrypt(newlyEncrypted)).toBe(
+      'new-refresh-token',
+    );
+    expect(() => previousCipher.decrypt(newlyEncrypted)).toThrow('invalid or expired');
+  });
+
   test('creates a PKCE authorization request and saves a hashed state', async () => {
     const { service, states } = createService();
     const authorization = await service.begin();
@@ -398,6 +414,7 @@ describe('Google OAuth', () => {
       clientId: 'client-id',
       clientSecret: 'client-secret',
       tokenEncryptionKey: encryptionKey,
+      tokenEncryptionPreviousKeys: [],
     });
   });
 
