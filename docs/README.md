@@ -16,12 +16,15 @@ docs/
 │   │   └── specification-template.md
 │   └── job-search-email-agent/
 │       ├── specification.md
-│       └── implementation-plan.md
+│       ├── implementation-plan.md
+│       └── operation-guide.md
 └── decisions/
     ├── 0001-modular-monolith.md
     ├── 0002-hono-and-bun.md
     └── 0003-drizzle-and-postgresql.md
 ```
+
+提出時に確認する要件とデモの進め方は [submission.md](submission.md) を参照してください。
 
 ## 共通アーキテクチャ
 
@@ -57,7 +60,7 @@ Runtime / Package manager / Test: Bun
 API: Hono
 Worker: Bunプロセス
 Validation: Zod
-Database: PostgreSQL 17
+Database: PostgreSQL 18.4
 ORM: Drizzle ORM
 Driver: postgres.js
 Local runtime: Docker Compose
@@ -67,7 +70,7 @@ Local runtime: Docker Compose
 
 | Agent ID | 名称 | 概要 | 状態 |
 |---|---|---|---|
-| `job-search-email` | 就職活動メールエージェント | Gmailの就活関連メールを解析し、返信下書きとWeb面談予定を作成する | 仕様策定中 |
+| `job-search-email` | 就職活動メールエージェント | Gmailの就活関連メールを解析し、返信下書きとWeb面談予定を作成する | 実装済み |
 
 ## 新規エージェント追加手順
 
