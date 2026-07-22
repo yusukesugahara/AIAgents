@@ -1,6 +1,6 @@
 # AIAgents — 就職活動メールエージェント
 
-Gmailで受信した就職活動・採用連絡メールを解析し、返信が必要なメールの**Gmail下書き**を作成するTypeScriptアプリケーションです。確定したオンライン面談は、設定に応じてGoogle Calendarへ登録します。メールの自動送信は行いません。
+Gmailで受信した就職活動・採用連絡メールを解析し、返信が必要なメールの**Gmail下書き**を作成するTypeScriptアプリケーションです。確定したオンライン面談をGoogle Calendarへ登録する処理も実装していますが、現行のセットアップ画面ではCalendar作成を有効化できません。メールの自動送信は行いません。
 
 本リポジトリは、RAYVEN 技術課題のテーマA「AI APIを使ったAIエージェント開発」の成果物として整備しています。
 
@@ -15,7 +15,7 @@ Gmailで受信した就職活動・採用連絡メールを解析し、返信が
 - Gmail OAuthによる受信メールの取得とGmail下書き作成
 - OpenAI Responses APIのStructured Outputsによるメール分類・返信要否・面談情報の抽出
 - 日程調整メールに対する、候補日時を編集できる返信下書きの作成
-- Google Calendarへの面談予定登録（明示的な安全条件を満たした場合のみ）
+- Google Calendarへの面談予定登録ロジック（安全条件・競合確認・冪等性を実装済み。設定UIは未実装）
 - PostgreSQLジョブキューによる定期実行、リトライ、冪等性制御
 - セットアップ画面からの即時定期実行・既存ジョブの安全な再実行
 - 実行履歴、対象メール件名、各Step、Gmail Draft IDの表示
@@ -55,7 +55,7 @@ sequenceDiagram
     W->>G: 返信下書きを作成または既存下書きを確認
     W->>D: Draft IDと実行結果を保存
   else 要確認または返信不要
-    W->>D: needs_review / completed を保存
+    W->>D: Agent結果とcompleted Runを保存
   end
 ```
 
@@ -76,7 +76,7 @@ sequenceDiagram
 
 - メールは**送信しません**。作成対象はGmail下書きだけです。
 - LLM出力はZodで検証し、信頼度・必要情報・スレッドの鮮度を確認してから外部書き込みを行います。
-- Gmail本文、Prompt、LLMの生成本文はDBや実行履歴へ保存・表示しません。
+- Gmail本文そのもの、Prompt、LLMの生成返信本文はDBや実行履歴へ保存・表示しません。構造化解析結果には、判断根拠として最大5件・各240文字までの`evidence`を保存します。
 - 同一メールは冪等キーで重複処理を防ぎます。
 - DBにある下書きIDを再利用する前にGmailの実在を確認し、存在しない場合は安全に再作成します。
 - Google Refresh TokenはAES-256-GCMで暗号化して保存します。
@@ -87,7 +87,7 @@ sequenceDiagram
 
 - Bun 1.3.14
 - Docker / Docker Compose
-- Google CloudのOAuth Client（Gmail read / compose、必要に応じてCalendar）
+- Google CloudのOAuth Client（Gmail read / compose）
 - OpenAI API Key
 
 ### 1. 依存関係をインストール
@@ -139,6 +139,8 @@ bun --no-env-file run compose:dev
 4. 実行履歴で対象メールの件名、分類、下書きID、要確認理由を確認します。
 5. Gmailの「下書き」で内容を編集・確認してから、ユーザー自身が送信します。
 
+Calendar用の追加認可Routeと予定作成処理はありますが、現行セットアップ画面が保存する返信設定では`createCalendarEvents`が`false`になります。UI/APIからCalendar作成を有効化する機能は未実装です。
+
 定期実行は起動直後と、その後 `GMAIL_POLL_INTERVAL_SECONDS` ごとに動きます。既定値は300秒です。検索対象は `GMAIL_LOOKBACK_QUERY`（既定: `in:inbox newer_than:1d`）に一致するメールです。
 
 同じメールを再解析したい場合は「既存ジョブをリセットして再実行」を使います。過去の実行履歴は削除せず、新しいJobを作成します。Gmail下書きとCalendar予定は重複作成しません。
@@ -151,7 +153,7 @@ bun --no-env-file run lint
 bun --no-env-file test
 ```
 
-外部サービスを使う統合テストは、明示的に起動したローカルPostgreSQLに対して実行します。
+DB統合テストは`localhost:5432/ai_agents`で明示的に起動したPostgreSQLに対して実行します。通常の`docker compose up`が公開する既定ポートは`15432`なので、このテストの接続先とは異なります。Docker統合テストはテストコードが専用のCompose環境を起動します。
 
 ```bash
 bun --no-env-file run test:integration:database

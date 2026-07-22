@@ -4,7 +4,7 @@
 
 テーマA: AI APIを使ったAIエージェント開発
 
-本アプリケーションは、就職活動メールを対象とする業務エージェントです。GmailとGoogle Calendarを実業務の入出力に用い、OpenAI APIでメール理解を行います。
+本アプリケーションは、就職活動メールを対象とする業務エージェントです。Gmailを実業務の入出力に用い、OpenAI APIでメール理解を行います。Google Calendar連携処理も実装済みですが、現行UIから作成設定を有効化する機能は未実装です。
 
 ## 提出前チェックリスト
 
@@ -13,7 +13,7 @@
 | TypeScriptで実装 | 対応済み | Bun Workspace配下の全実装 |
 | 任意のLLM APIを使うエージェント | 対応済み | OpenAI Responses API、Structured Outputs |
 | UIを持つ | 対応済み | セットアップ・実行履歴Web画面 |
-| E2Eで動作 | 対応済み | Docker Compose、OAuth、Worker、Gmail下書きフロー |
+| E2Eで動作 | 一部対応 | Compose起動・Fake OAuth・`echo` AgentのE2Eと、Fake Gmail/Calendar/OpenAIを使う求人メール統合テスト。実Google/OpenAIの自動E2Eは未実装 |
 | API・アーキテクチャ選定理由をREADMEへ記載 | 対応済み | [README](../README.md) |
 | Function Calling / Tool Useループを自前実装 | **未対応** | 下記「提出前に追加する実装」参照 |
 | README整備 | 対応済み | セットアップ、構成図、利用方法、設計意図を記載 |

@@ -7,6 +7,7 @@
 ```text
 docs/
 ├── README.md
+├── submission.md
 ├── architecture/
 │   ├── repository-structure.md
 │   ├── technical-stack.md
@@ -30,7 +31,7 @@ docs/
 
 | 文書 | 内容 |
 |---|---|
-| `architecture/repository-structure.md` | `apps`、`agents`、`packages`の構成と責務 |
+| `architecture/repository-structure.md` | `apps`、`agents`、`packages`の推奨構成と責務 |
 | `architecture/technical-stack.md` | Hono、Bun、PostgreSQL、Drizzle等の利用範囲 |
 | `architecture/dependency-rules.md` | package間の依存方向と禁止import |
 
@@ -71,6 +72,8 @@ Local runtime: Docker Compose
 | Agent ID | 名称 | 概要 | 状態 |
 |---|---|---|---|
 | `job-search-email` | 就職活動メールエージェント | Gmailの就活関連メールを解析し、返信下書きとWeb面談予定を作成する | 実装済み |
+
+`job-search-email`のCalendar作成処理は実装済みですが、現行セットアップ画面から作成設定を有効化する機能は未実装です。現在の動作と制約は[`specification.md`](agents/job-search-email-agent/specification.md)を参照してください。
 
 ## 新規エージェント追加手順
 

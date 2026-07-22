@@ -1,5 +1,7 @@
 # 複数AIエージェント向けリポジトリ構成
 
+> この文書のディレクトリツリーとコード例は、新規エージェント追加時の推奨構成です。現行ファイル構成の一覧ではありません。`job-search-email`の現在の実装契約は[`../agents/job-search-email-agent/specification.md`](../agents/job-search-email-agent/specification.md)を参照してください。
+
 ## 1. 目的
 
 このリポジトリは、用途の異なる複数のAIエージェントを同一基盤上で設計・実装・運用することを前提とします。
@@ -18,7 +20,7 @@
 | HTTP API | Hono |
 | Worker | Bunプロセス |
 | Validation | Zod |
-| Database | PostgreSQL 17 |
+| Database | PostgreSQL 18.4 |
 | ORM | Drizzle ORM |
 | PostgreSQL driver | postgres.js |
 | Test | `bun:test` |
@@ -408,15 +410,18 @@ registry.register(
 
 - `users`
 - `connections`
+- `oauth_authorization_states`
+- `agent_definitions`
 - `agent_settings`
 - `agent_jobs`
 - `agent_runs`
 - `agent_run_steps`
+- `llm_invocations`
 - `agent_errors`
+- `review_requests`
 
 ### エージェント固有テーブル
 
-- `job_email_messages`
 - `job_email_analyses`
 - `job_email_drafts`
 - `job_calendar_events`
@@ -459,59 +464,16 @@ LIMIT 1;
 
 ## 11. Docker Compose構成
 
-初期段階では次の3コンテナを使用します。
+現在は次の4サービスを使用します。詳細なcommand、環境変数、依存関係、Health Check、公開ポートはリポジトリ直下の`compose.yaml`を正とします。
 
 ```text
 api       Hono + Bun
 worker    Bun
-postgres  PostgreSQL 17
+migrate   Drizzle Migration
+postgres  PostgreSQL 18.4
 ```
 
-```yaml
-services:
-  api:
-    build:
-      context: .
-      dockerfile: docker/api.Dockerfile
-    command: bun --filter @ai-agents/api start
-    ports:
-      - "4000:4000"
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  worker:
-    build:
-      context: .
-      dockerfile: docker/worker.Dockerfile
-    command: bun --filter @ai-agents/worker start
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  postgres:
-    image: postgres:17
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ai_agents
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_agents"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-volumes:
-  postgres_data:
-```
+PostgreSQLは`postgres:18.4`を使用し、永続Volumeは`/var/lib/postgresql`へマウントします。ホスト側の既定公開ポートは`15432`、コンテナ間接続は`postgres:5432`です。Bunコマンドはすべて`--no-env-file`を明示します。
 
 ## 12. Bun Workspaces
 
