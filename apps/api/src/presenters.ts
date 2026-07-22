@@ -24,9 +24,7 @@ export function toRunResponse(run: AgentRun, steps: readonly AgentRunStep[] = []
   return {
     agentId: run.agentId,
     completedAt: run.completedAt ? toIsoString(run.completedAt) : null,
-    emailSubject: toSafeEmailSubject(run.emailSubject),
     errorCode: run.errorCode,
-    errorDetail: toSafeRunErrorDetail(run.errorCode, run.errorMessage),
     id: run.id,
     jobId: run.jobId,
     startedAt: toIsoString(run.startedAt),
@@ -37,6 +35,14 @@ export function toRunResponse(run: AgentRun, steps: readonly AgentRunStep[] = []
         ? [...steps].sort((left, right) => left.sequence - right.sequence).map(toStepResponse)
         : [],
     triggerType: run.triggerType,
+  };
+}
+
+export function toRunHistoryResponse(run: AgentRun, steps: readonly AgentRunStep[] = []) {
+  return {
+    ...toRunResponse(run, steps),
+    emailSubject: toSafeEmailSubject(run.emailSubject),
+    errorDetail: toSafeRunErrorDetail(run.errorCode, run.errorMessage),
   };
 }
 
@@ -148,8 +154,17 @@ function toSafeStepOutput(value: unknown): Record<string, unknown> | null {
 
 function toSafeEmailSubject(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
-  const subject = value.replace(/[\u0000-\u001F\u007F]/gu, ' ').trim();
+  const subject = replaceControlCharacters(value).trim();
   return subject && subject.length <= 512 ? subject : null;
+}
+
+function replaceControlCharacters(value: string): string {
+  return [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || codePoint === 127 ? ' ' : character;
+    })
+    .join('');
 }
 
 function toIsoString(value: Date | string): string {

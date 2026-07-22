@@ -1,10 +1,10 @@
 import type { JobQueue } from '@ai-agents/agent-core';
 import type { GmailReader } from '@ai-agents/connector-google';
+import type { GoogleConnectionSummaryRepository } from '@ai-agents/google-oauth';
 import {
   enqueueScheduledGmailPoll,
   type JobEmailSettingsRepository,
 } from '@ai-agents/job-search-email';
-import type { GoogleConnectionSummaryRepository } from '@ai-agents/google-oauth';
 
 export interface GmailPollerHandle {
   pollNow(): Promise<void>;

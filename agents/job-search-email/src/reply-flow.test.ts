@@ -137,11 +137,14 @@ describe('Job Search Email reply flow', () => {
     const dependencies = createDependencies(analysisResult);
     const gmailDrafts = new FakeGmailDraftWriter();
 
-    const output = await createJobSearchEmailAgent({ ...dependencies, gmailDrafts }).run(context(), {
-      googleConnectionId: connectionId,
-      gmailMessageId: 'message-1',
-      gmailThreadId: 'thread-1',
-    });
+    const output = await createJobSearchEmailAgent({ ...dependencies, gmailDrafts }).run(
+      context(),
+      {
+        googleConnectionId: connectionId,
+        gmailMessageId: 'message-1',
+        gmailThreadId: 'thread-1',
+      },
+    );
 
     expect(output).toMatchObject({ draftId: 'draft-1', result: 'completed' });
     expect(gmailDrafts.created[0]?.body).toContain('【候補日時を入力してください】');
@@ -156,11 +159,14 @@ describe('Job Search Email reply flow', () => {
     const dependencies = createDependencies(analysisResult);
     const gmailDrafts = new FakeGmailDraftWriter();
 
-    const output = await createJobSearchEmailAgent({ ...dependencies, gmailDrafts }).run(context(), {
-      googleConnectionId: connectionId,
-      gmailMessageId: 'message-1',
-      gmailThreadId: 'thread-1',
-    });
+    const output = await createJobSearchEmailAgent({ ...dependencies, gmailDrafts }).run(
+      context(),
+      {
+        googleConnectionId: connectionId,
+        gmailMessageId: 'message-1',
+        gmailThreadId: 'thread-1',
+      },
+    );
 
     expect(output).toMatchObject({ draftId: 'draft-1', result: 'completed' });
     expect(dependencies.analyses.saved[0]?.analysis).toMatchObject({
@@ -358,7 +364,11 @@ describe('Job Search Email reply flow', () => {
     const dependencies = createDependencies(analysisResult);
     dependencies.llm = new FakeLlmProvider([
       { data: analysisResult, metadata, status: 'completed' },
-      { data: { body: '承知しました。', confidence: 0.95, warnings: [] }, metadata, status: 'completed' },
+      {
+        data: { body: '承知しました。', confidence: 0.95, warnings: [] },
+        metadata,
+        status: 'completed',
+      },
     ]);
     const drafts = new FakeDraftRepository();
     drafts.reservation = { draftId: 'stale-draft', status: 'completed' };

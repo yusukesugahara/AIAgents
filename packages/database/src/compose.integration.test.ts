@@ -4,6 +4,7 @@ const dockerIntegrationEnabled = process.env.DOCKER_INTEGRATION_TESTS === '1';
 const oauthEmail = `compose-oauth-${crypto.randomUUID()}@example.com`;
 const composeEnvironment = {
   ...process.env,
+  API_ACCESS_TOKEN: '',
   API_HOST_PORT: '14000',
   APP_ENV: 'test',
   COMPOSE_PROJECT_NAME: 'ai_agents_pr02_integration',
@@ -12,6 +13,9 @@ const composeEnvironment = {
   GOOGLE_CLIENT_SECRET: 'compose-client-secret',
   GOOGLE_OAUTH_E2E_EMAIL: oauthEmail,
   GOOGLE_REDIRECT_URI: 'http://localhost:14000/auth/google/callback',
+  GMAIL_LOOKBACK_QUERY: 'in:inbox newer_than:1d',
+  GMAIL_POLL_INTERVAL_SECONDS: '300',
+  GMAIL_POLL_MAX_RESULTS: '50',
   OPENAI_API_KEY: 'compose-fake-openai-key',
   OPENAI_ANALYSIS_MODEL: 'compose-fake-model',
   OPENAI_REPLY_MODEL: 'compose-fake-reply-model',

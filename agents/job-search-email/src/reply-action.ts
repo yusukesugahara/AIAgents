@@ -3,8 +3,8 @@ import type { AgentContext } from '@ai-agents/agent-core';
 import type { CreatedGmailDraft, EmailMessage, EmailThread } from '@ai-agents/connector-google';
 import { persistResult, persistSafely } from './persistence';
 import type {
-  JobEmailReplySettings,
   JobEmailReplyNotApplicableReason,
+  JobEmailReplySettings,
   JobEmailReviewReason,
   JobSearchEmailAgentDependencies,
 } from './ports';

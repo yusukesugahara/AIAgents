@@ -1,4 +1,4 @@
-node_modules/
+# Secrets: keep these out of Cursor indexing and AI context.
 .env
 .env.local
 .env.development
@@ -20,6 +20,3 @@ node_modules/
 **/.env.*.local
 !.env.example
 !**/.env.example
-coverage/
-dist/
-.DS_Store

@@ -99,6 +99,26 @@ export class PostgresJobQueue implements JobQueue {
       throw new Error('Failed to enqueue Job');
     }
 
+    if (input.retryFailed) {
+      const [requeued] = (await this.database.client`
+        UPDATE agent_jobs
+        SET status = 'queued', attempts = 0, available_at = ${availableAt},
+            locked_at = NULL, locked_by = NULL, last_error_code = NULL, last_error = NULL,
+            completed_at = NULL
+        WHERE agent_id = ${input.agentId}
+          AND idempotency_key = ${input.idempotencyKey}
+          AND input_json = ${inputJson}::jsonb
+          AND trigger_type = ${input.triggerType}
+          AND requested_available_at IS NOT DISTINCT FROM ${requestedAvailableAt}::timestamptz
+          AND status = 'failed'
+          AND last_error_code IN (
+            'RATE_LIMITED', 'TEMPORARY_UNAVAILABLE', 'JOB_LOCK_EXPIRED', 'JOB_RETRYABLE'
+          )
+        RETURNING ${this.database.client.unsafe(jobColumns)}
+      `) as AgentJobRow[];
+      if (requeued) return toAgentJob(requeued);
+    }
+
     const [existing] = (await this.database.client`
       SELECT ${this.database.client.unsafe(jobColumns)}
       FROM agent_jobs

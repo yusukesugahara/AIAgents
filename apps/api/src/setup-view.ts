@@ -165,7 +165,10 @@ function renderReplySettings(
   </section>`;
 }
 
-function renderScheduledPoll(view: SetupView, connections: readonly GoogleConnectionSummary[]): string {
+function renderScheduledPoll(
+  view: SetupView,
+  connections: readonly GoogleConnectionSummary[],
+): string {
   const disabled = !view.scheduledPollReady || connections.length === 0;
   return `<section class="panel" aria-labelledby="scheduled-poll-heading" style="margin-top:24px">
     <div class="panel-heading"><div><h2 id="scheduled-poll-heading">定期実行</h2><span class="muted">定期実行と同じ条件で、下書き作成が有効な全Googleアカウントの対象メールをキューへ投入します。</span></div></div>

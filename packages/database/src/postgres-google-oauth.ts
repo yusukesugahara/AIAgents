@@ -109,7 +109,6 @@ export class PostgresGoogleConnectionRepository
       WHERE type = 'google'
         AND status IN ('connected', 'reauth_required')
       ORDER BY updated_at DESC, id DESC
-      LIMIT 20
     `) as Array<{
       google_email: string;
       granted_scopes: string[] | null;

@@ -1,6 +1,6 @@
-import type { toRunResponse } from './presenters';
+import type { toRunHistoryResponse } from './presenters';
 
-type RunView = ReturnType<typeof toRunResponse>;
+type RunView = ReturnType<typeof toRunHistoryResponse>;
 
 interface RunHistoryListView {
   readonly hasMore: boolean;

@@ -256,7 +256,13 @@ function toAgentRun(row: AgentRunRow): AgentRun {
 
 function toSafeEmailSubject(value: string | null): string | null {
   if (typeof value !== 'string') return null;
-  const subject = value.replace(/[\u0000-\u001F\u007F]/gu, ' ').trim();
+  const subject = [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || codePoint === 127 ? ' ' : character;
+    })
+    .join('')
+    .trim();
   return subject ? subject.slice(0, 512) : null;
 }
 

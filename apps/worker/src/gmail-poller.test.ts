@@ -99,6 +99,7 @@ describe('Gmail poller', () => {
           gmailThreadId: 'thread-1',
           googleConnectionId: connectionOne.id,
         },
+        retryFailed: true,
         triggerType: 'schedule',
       },
       {
@@ -109,7 +110,59 @@ describe('Gmail poller', () => {
           gmailThreadId: 'thread-2',
           googleConnectionId: connectionOne.id,
         },
+        retryFailed: true,
         triggerType: 'schedule',
+      },
+    ]);
+  });
+
+  test('follows Gmail pagination so messages beyond the first page are queued', async () => {
+    const pageTokens: Array<string | undefined> = [];
+    const enqueued: EnqueueJobInput[] = [];
+    const poller = startGmailPoller({
+      connections: { listConnections: async () => [connectionOne] },
+      gmail: {
+        listMessages: async (input) => {
+          pageTokens.push(input.pageToken);
+          return input.pageToken
+            ? {
+                messages: [{ id: 'message-2', threadId: 'thread-2' }],
+                nextPageToken: null,
+              }
+            : {
+                messages: [{ id: 'message-1', threadId: 'thread-1' }],
+                nextPageToken: 'page-2',
+              };
+        },
+      },
+      intervalMs: 300_000,
+      logger: { error() {}, info() {} },
+      maxResults: 50,
+      query: 'in:inbox newer_than:1d',
+      queue: {
+        enqueue: async (input) => {
+          enqueued.push(input);
+          return job(input);
+        },
+      },
+      runImmediately: false,
+      settings: { getReplySettings: async () => enabledSettings },
+    });
+
+    await poller.pollNow();
+    await poller.stop();
+
+    expect(pageTokens).toEqual([undefined, 'page-2']);
+    expect(enqueued.map((input) => input.input)).toEqual([
+      {
+        gmailMessageId: 'message-1',
+        gmailThreadId: 'thread-1',
+        googleConnectionId: connectionOne.id,
+      },
+      {
+        gmailMessageId: 'message-2',
+        gmailThreadId: 'thread-2',
+        googleConnectionId: connectionOne.id,
       },
     ]);
   });

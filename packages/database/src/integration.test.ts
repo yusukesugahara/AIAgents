@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { IdempotencyConflictError, RetryableJobError } from '@ai-agents/agent-core';
+import {
+  AgentDependencyError,
+  IdempotencyConflictError,
+  RetryableJobError,
+} from '@ai-agents/agent-core';
 import { AesGcmTokenCipher } from '@ai-agents/google-oauth';
 import {
   jobEmailAnalysisPromptVersion,
@@ -452,6 +456,79 @@ describe.skipIf(!integrationEnabled || !databaseUrl)(
         await connection.client`DELETE FROM agent_jobs WHERE idempotency_key = ${idempotencyKey}`;
         await connection.close();
         await concurrentConnection.close();
+      }
+    });
+
+    test('requeues only matching terminal transient failures on an idempotent poll', async () => {
+      const connection = createDatabaseConnection({ databaseUrl: integrationDatabaseUrl });
+      const queue = new PostgresJobQueue(connection, { maxAttempts: 1 });
+      const agentId = `poll-agent-${crypto.randomUUID()}`;
+      const transientKey = `poll-transient-${crypto.randomUUID()}`;
+      const permanentKey = `poll-permanent-${crypto.randomUUID()}`;
+      const request = (idempotencyKey: string, retryFailed = false) => ({
+        agentId,
+        idempotencyKey,
+        input: { source: 'integration' },
+        ...(retryFailed ? { retryFailed: true } : {}),
+        triggerType: 'schedule',
+      });
+
+      try {
+        const transientJob = await queue.enqueue(request(transientKey));
+        const claimedTransient = await queue.claimNext({ agentId, workerId: 'worker-transient' });
+        expect(claimedTransient?.id).toBe(transientJob.id);
+        await queue.fail({
+          error: new AgentDependencyError(
+            'TEMPORARY_UNAVAILABLE',
+            true,
+            'temporary integration failure',
+          ),
+          jobId: transientJob.id,
+          retryable: true,
+          workerId: 'worker-transient',
+        });
+        expect(await queue.enqueue(request(transientKey))).toMatchObject({ status: 'failed' });
+        expect(await queue.enqueue(request(transientKey, true))).toMatchObject({
+          attempts: 0,
+          id: transientJob.id,
+          lastError: null,
+          lastErrorCode: null,
+          status: 'queued',
+        });
+
+        const reclaimedTransient = await queue.claimNext({
+          agentId,
+          workerId: 'worker-transient-retry',
+        });
+        expect(reclaimedTransient?.id).toBe(transientJob.id);
+        await queue.complete({
+          jobId: transientJob.id,
+          workerId: 'worker-transient-retry',
+        });
+
+        const permanentJob = await queue.enqueue(request(permanentKey));
+        await queue.claimNext({ agentId, workerId: 'worker-permanent' });
+        await queue.fail({
+          error: new AgentDependencyError(
+            'INVALID_REQUEST',
+            false,
+            'permanent integration failure',
+          ),
+          jobId: permanentJob.id,
+          retryable: false,
+          workerId: 'worker-permanent',
+        });
+        expect(await queue.enqueue(request(permanentKey, true))).toMatchObject({
+          attempts: 1,
+          id: permanentJob.id,
+          lastErrorCode: 'INVALID_REQUEST',
+          status: 'failed',
+        });
+      } finally {
+        await connection.client`
+          DELETE FROM agent_jobs WHERE idempotency_key IN (${transientKey}, ${permanentKey})
+        `;
+        await connection.close();
       }
     });
 

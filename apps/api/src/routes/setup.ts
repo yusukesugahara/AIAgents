@@ -16,11 +16,11 @@ const draftTestErrorSchema = z
   .trim()
   .regex(/^[A-Z][A-Z0-9_]{0,63}$/u);
 const scheduledPollResultSchema = z.object({
-  connectionFailures: z.coerce.number().int().min(0).max(100),
-  eligibleConnections: z.coerce.number().int().min(0).max(100),
-  enqueueFailures: z.coerce.number().int().min(0).max(10_000),
-  jobRequestsAccepted: z.coerce.number().int().min(0).max(10_000),
-  messagesFound: z.coerce.number().int().min(0).max(10_000),
+  connectionFailures: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  eligibleConnections: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  enqueueFailures: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  jobRequestsAccepted: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  messagesFound: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 });
 const csrfCookieName = 'ai_agents_setup_csrf';
 const csrfTokenPattern = /^[a-f0-9]{32}$/u;
@@ -98,7 +98,11 @@ export function registerSetupRoutes(
             query: 'in:inbox newer_than:7d',
           });
           const fetchedMessages: SetupMessageView[] = [];
-          for (let start = 0; start < page.messages.length; start += gmailMetadataFetchConcurrency) {
+          for (
+            let start = 0;
+            start < page.messages.length;
+            start += gmailMetadataFetchConcurrency
+          ) {
             const references = page.messages.slice(start, start + gmailMetadataFetchConcurrency);
             const batch = await Promise.all(
               references.map(async (reference) => {
@@ -413,7 +417,9 @@ function redirectScheduledPollResult(
     connectionFailures: result.connectionFailures,
     eligibleConnections: result.eligibleConnections,
     enqueueFailures: result.enqueueFailures,
-    event: reset ? 'api.gmail_scheduled_poll.reset_completed' : 'api.gmail_scheduled_poll.completed',
+    event: reset
+      ? 'api.gmail_scheduled_poll.reset_completed'
+      : 'api.gmail_scheduled_poll.completed',
     jobRequestsAccepted: result.jobRequestsAccepted,
     messagesFound: result.messagesFound,
     requestId: context.get('requestId'),

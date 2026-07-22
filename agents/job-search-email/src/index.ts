@@ -25,8 +25,8 @@ import {
 } from './schemas';
 import { isValidIanaTimeZone } from './validation';
 
-export { manifest } from './manifest';
 export * from './analysis-normalization';
+export { manifest } from './manifest';
 export * from './ports';
 export * from './prompt';
 export * from './scheduled-gmail-poll';

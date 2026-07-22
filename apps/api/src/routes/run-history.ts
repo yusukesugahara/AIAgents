@@ -1,7 +1,7 @@
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { type ApiAppOptions, type ApiEnvironment, ApiError } from '../api-types';
-import { toRunResponse } from '../presenters';
+import { toRunHistoryResponse } from '../presenters';
 import { renderRunHistoryDetail, renderRunHistoryList } from '../run-history-view';
 
 const runIdSchema = z.uuid();
@@ -21,7 +21,7 @@ export function registerRunHistoryRoutes(app: Hono<ApiEnvironment>, options: Api
       renderRunHistoryList({
         hasMore: result.hasMore,
         page,
-        runs: result.runs.map((run) => toRunResponse(run)),
+        runs: result.runs.map((run) => toRunHistoryResponse(run)),
       }),
     );
   });
@@ -33,7 +33,7 @@ export function registerRunHistoryRoutes(app: Hono<ApiEnvironment>, options: Api
     if (!run) throw new ApiError('RUN_NOT_FOUND', 404, `Run "${runId}" was not found`);
     const steps = runs.getSteps ? await runs.getSteps(runId) : [];
     setHistoryHeaders(context);
-    return context.html(renderRunHistoryDetail(toRunResponse(run, steps)));
+    return context.html(renderRunHistoryDetail(toRunHistoryResponse(run, steps)));
   });
 }
 

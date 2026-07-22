@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { AgentDependencyError } from '@ai-agents/agent-core';
 import { createDevelopmentAgentRegistry } from '@ai-agents/agent-composition';
+import { AgentDependencyError } from '@ai-agents/agent-core';
 import type {
   CreatedGmailDraft,
   CreateReplyDraftInput,
@@ -208,6 +208,7 @@ describe('Setup Web routes', () => {
           gmailThreadId: 'thread-1',
           googleConnectionId: connectionId,
         },
+        retryFailed: true,
         triggerType: 'schedule',
       },
       {
@@ -218,6 +219,7 @@ describe('Setup Web routes', () => {
           gmailThreadId: 'thread-2',
           googleConnectionId: connectionId,
         },
+        retryFailed: true,
         triggerType: 'schedule',
       },
     ]);
@@ -260,6 +262,7 @@ describe('Setup Web routes', () => {
         gmailThreadId: 'thread-1',
         googleConnectionId: connectionId,
       },
+      retryFailed: true,
       triggerType: 'schedule',
     });
 
